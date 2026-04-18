@@ -1,0 +1,31 @@
+# LLM & embeddings
+transformers>=4.40
+sentence-transformers>=3.0
+huggingface-hub>=0.22
+
+# RAG / vector search
+faiss-cpu>=1.8
+langchain>=0.2
+
+# Code parsing
+tree-sitter>=0.22
+tree-sitter-c>=0.21
+tree-sitter-java>=0.21
+
+# Static tool wrappers
+semgrep>=1.70
+
+# Evaluation & data
+datasets>=2.19
+pandas>=2.2
+scikit-learn>=1.4
+numpy>=1.26
+
+# CLI
+typer>=0.12
+rich>=13.7
+
+# Utilities
+python-dotenv>=1.0
+pydantic>=2.7
+tqdm>=4.66

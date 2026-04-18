@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+
+# Data (too large for git)
+data/raw/
+data/processed/
+data/rag_corpus/embeddings/
+
+# Environment
+.env
+*.env
+
+# Experiment outputs
+experiments/results/
+
+# Editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
