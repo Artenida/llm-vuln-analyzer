@@ -5,8 +5,10 @@ from pathlib import Path
 from src.config import load_config
 from src.preprocessing.data_loader import load_juliet_folder, CodeSample
 from src.llm.client import LLMClient, VulnerabilityReport
+from src.evaluation import evaluate_result_file, load_multiple_result_files, build_report, save_report, print_summary
 
 app = typer.Typer()
+
 
 def report_to_dict(sample: CodeSample, report: VulnerabilityReport) -> dict:
     return {
@@ -28,12 +30,18 @@ def report_to_dict(sample: CodeSample, report: VulnerabilityReport) -> dict:
         }
     }
 
+
 @app.command()
 def analyze(
     config_path: str = typer.Option(
         "experiments/configs/default.yaml",
         "--config", "-c",
-        help="Path to config YAML file"
+        help="Path to config YAML file",
+    ),
+    evaluate_after: bool = typer.Option(
+        True,
+        "--evaluate/--no-evaluate",
+        help="Run evaluation automatically after analysis finishes",
     ),
 ):
     """Analyze code samples for vulnerabilities using config file settings."""
@@ -70,20 +78,96 @@ def analyze(
     output_path = f"{config.output.folder}/analysis_{config.llm.model}_{timestamp}.json"
     Path(config.output.folder).mkdir(parents=True, exist_ok=True)
 
+    result_data = {
+        "metadata": {
+            "model": config.llm.model,
+            "provider": config.llm.provider,
+            "total_samples": len(results),
+            "timestamp": datetime.now().isoformat(),
+            "folder": config.dataset.folder,
+            "config_used": config_path,
+        },
+        "results": results,
+    }
+
     with open(output_path, "w") as f:
-        json.dump({
-            "metadata": {
-                "model": config.llm.model,
-                "provider": config.llm.provider,
-                "total_samples": len(results),
-                "timestamp": datetime.now().isoformat(),
-                "folder": config.dataset.folder,
-                "config_used": config_path,
-            },
-            "results": results,
-        }, f, indent=2)
+        json.dump(result_data, f, indent=2)
 
     typer.echo(f"\nDone. Results saved to: {output_path}")
 
+    # Automatically run evaluation unless disabled
+    if evaluate_after:
+        typer.echo("\nRunning evaluation...")
+        eval_output = output_path.replace(
+            config.output.folder,
+            f"{config.output.folder}/evaluations",
+        ).replace("analysis_", "eval_")
+        evaluate_result_file(
+            result_path=output_path,
+            output_path=eval_output,
+            print_to_console=True,
+        )
+
+
+@app.command()
+def evaluate(
+    result_path: str = typer.Argument(
+        ...,
+        help="Path to an analysis JSON file produced by the 'analyze' command",
+    ),
+    output_path: str = typer.Option(
+        None,
+        "--output", "-o",
+        help="Where to save the evaluation report JSON (optional)",
+    ),
+    compare: list[str] = typer.Option(
+        None,
+        "--compare",
+        help="Additional result files to merge and evaluate together",
+    ),
+):
+    """
+    Evaluate a result file and print a metrics report.
+
+    Examples:
+
+      # Evaluate a single result file
+      python cli.py evaluate experiments/results/analysis_gpt-4o-mini_20260502.json
+
+      # Evaluate and save the report
+      python cli.py evaluate experiments/results/analysis_gpt-4o-mini_20260502.json \\
+          --output experiments/results/evaluations/eval_20260502.json
+
+      # Merge and compare two result files side-by-side
+      python cli.py evaluate experiments/results/run_a.json \\
+          --compare experiments/results/run_b.json
+    """
+    # Single file or multi-file merge
+    if compare:
+        all_paths = [result_path] + list(compare)
+        typer.echo(f"Merging {len(all_paths)} result files...")
+        merged_meta, results = load_multiple_result_files(all_paths)
+        report = build_report(results, metadata=merged_meta)
+
+        if output_path:
+            saved = save_report(report, output_path)
+            typer.echo(f"Report saved to: {saved}")
+
+        print_summary(report)
+    else:
+        # Derive a sensible default output path if none given
+        if output_path is None:
+            p = Path(result_path)
+            output_path = str(
+                p.parent / "evaluations" / p.name.replace("analysis_", "eval_")
+            )
+
+        evaluate_result_file(
+            result_path=result_path,
+            output_path=output_path,
+            print_to_console=True,
+        )
+
+
 if __name__ == "__main__":
-    typer.run(analyze)
+    app()

@@ -14,3 +14,12 @@ dataset:
 output:
   folder: experiments/results
   save_raw_response: true   # save the raw LLM response in the JSON
+
+# Evaluation configuration
+evaluation:
+  # Automatically run evaluation after every analyze run
+  auto_evaluate: true
+  # Where to save evaluation report JSONs (relative to project root)
+  output_folder: experiments/results/evaluations
+  # Minimum acceptable coverage — cli.py will print a warning if below this
+  min_coverage_pct: 80
