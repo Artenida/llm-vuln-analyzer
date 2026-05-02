@@ -1,0 +1,16 @@
+# LLM configuration
+llm:
+  provider: openai          # openai or anthropic
+  model: gpt-4o-mini
+  max_tokens: 2000
+  temperature: 0
+
+# Dataset configuration
+dataset:
+  folder: data/raw/juliet/juliet/Java/src/testcases
+  limit: 10                 # how many samples to analyze per run, null = all
+
+# Output configuration
+output:
+  folder: experiments/results
+  save_raw_response: true   # save the raw LLM response in the JSON
