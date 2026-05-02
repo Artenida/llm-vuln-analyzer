@@ -3,7 +3,7 @@ import typer
 from datetime import datetime
 from pathlib import Path
 from src.config import load_config
-from src.preprocessing.data_loader import load_juliet_folder, CodeSample
+from src.preprocessing.data_loader import load_juliet_folder, dataset_summary, CodeSample
 from src.llm.client import LLMClient, VulnerabilityReport
 from src.evaluation import evaluate_result_file, load_multiple_result_files, build_report, save_report, print_summary
 
@@ -55,10 +55,18 @@ def analyze(
 
     # Load samples
     typer.echo(f"\nLoading samples...")
-    samples = load_juliet_folder(config.dataset.folder)
-    if config.dataset.limit:
-        samples = samples[:config.dataset.limit]
-    typer.echo(f"Loaded {len(samples)} samples")
+    samples = load_juliet_folder(
+        config.dataset.folder,
+        limit=config.dataset.limit,
+        limit_per_cwe=config.dataset.limit_per_cwe,
+    )
+
+    summary = dataset_summary(samples)
+    typer.echo(f"Loaded {summary['total']} samples  "
+               f"({summary['vulnerable']} vulnerable, {summary['safe']} safe)")
+    typer.echo("  CWE breakdown:")
+    for cwe, count in summary["by_cwe"].items():
+        typer.echo(f"    {cwe:<12} {count} samples")
 
     # Run analysis
     client = LLMClient(

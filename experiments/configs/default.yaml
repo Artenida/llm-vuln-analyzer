@@ -1,6 +1,6 @@
 # LLM configuration
 llm:
-  provider: openai          # openai or anthropic
+  provider: openai
   model: gpt-4o-mini
   max_tokens: 2000
   temperature: 0
@@ -8,18 +8,24 @@ llm:
 # Dataset configuration
 dataset:
   folder: data/raw/juliet/juliet/Java/src/testcases
-  limit: 10                 # how many samples to analyze per run, null = all
+
+  # limit_per_cwe: how many samples to take from each CWE folder.
+  # Keeps the dataset balanced — prevents one large CWE from dominating metrics.
+  # 20 gives ~320 samples across 16 CWEs (good for a first full run).
+  # Set to null to take everything from every CWE.
+  limit_per_cwe: 20
+
+  # limit: hard cap on total samples across all CWEs (applied after limit_per_cwe).
+  # Set to null to use all samples up to limit_per_cwe * number_of_CWEs.
+  limit: null
 
 # Output configuration
 output:
   folder: experiments/results
-  save_raw_response: true   # save the raw LLM response in the JSON
+  save_raw_response: true
 
 # Evaluation configuration
 evaluation:
-  # Automatically run evaluation after every analyze run
   auto_evaluate: true
-  # Where to save evaluation report JSONs (relative to project root)
   output_folder: experiments/results/evaluations
-  # Minimum acceptable coverage — cli.py will print a warning if below this
   min_coverage_pct: 80
