@@ -5,19 +5,21 @@ llm:
   max_tokens: 2000
   temperature: 0
 
-# Dataset configuration
+# Juliet dataset configuration
 dataset:
   folder: data/raw/juliet/juliet/Java/src/testcases
-
-  # limit_per_cwe: how many samples to take from each CWE folder.
-  # Keeps the dataset balanced — prevents one large CWE from dominating metrics.
-  # 20 gives ~320 samples across 16 CWEs (good for a first full run).
-  # Set to null to take everything from every CWE.
   limit_per_cwe: 20
-
-  # limit: hard cap on total samples across all CWEs (applied after limit_per_cwe).
-  # Set to null to use all samples up to limit_per_cwe * number_of_CWEs.
   limit: null
+
+# BigVul dataset configuration
+bigvul:
+  enabled: true            # set to true to include BigVul in the run
+  csv_path: data/raw/bigvul/MSR_data_cleaned.csv
+  limit_per_cwe: 10         # 10 vuln + 10 safe per CWE = 20 per CWE
+  limit: null               # null = use limit_per_cwe only
+  languages:                # null = all languages; or restrict e.g.:
+    - C
+    - C++
 
 # Output configuration
 output:

@@ -18,18 +18,20 @@ class VulnerabilityReport:
     patch_suggestion: str
     confidence: float
     hallucination_flag: bool
-    raw_response: str        # always store the raw LLM output
+    raw_response: str
     model_used: str
 
-SYSTEM_PROMPT = """You are a security-focused code reviewer with deep knowledge 
-of the MITRE CWE taxonomy and Java security vulnerabilities.
 
-Analyze the provided Java method for security vulnerabilities.
-Be precise and conservative — only report what you can directly 
+SYSTEM_PROMPT = """You are a security-focused code reviewer with deep knowledge
+of the MITRE CWE taxonomy and software security vulnerabilities across multiple
+programming languages including Java, C, C++, Python, and JavaScript.
+
+Analyze the provided code for security vulnerabilities.
+Be precise and conservative — only report what you can directly
 justify from the code. Do not speculate."""
 
 OUTPUT_SCHEMA = """
-Respond ONLY with a valid JSON object. No explanation before or after. 
+Respond ONLY with a valid JSON object. No explanation before or after.
 No markdown fences. Just the raw JSON:
 
 {
@@ -44,26 +46,39 @@ No markdown fences. Just the raw JSON:
 }
 """
 
+# Language display names for the prompt
+LANGUAGE_LABELS = {
+    "java":       "Java",
+    "c":          "C",
+    "c++":        "C++",
+    "cpp":        "C++",
+    "python":     "Python",
+    "javascript": "JavaScript",
+    "js":         "JavaScript",
+    "php":        "PHP",
+}
+
+
 def build_user_prompt(sample: CodeSample) -> str:
-    return f"""Analyze this Java method for security vulnerabilities.
+    lang_label = LANGUAGE_LABELS.get(sample.language.lower(), sample.language.upper())
+    return f"""Analyze this {lang_label} function for security vulnerabilities.
 
 ### Method: `{sample.function_name}`
-### CWE context: This file is from a dataset covering {sample.cwe_id} vulnerabilities.
+### CWE context: This sample is from a dataset covering {sample.cwe_id} vulnerabilities.
 
-```java
+```{sample.language.lower()}
 {sample.source_code}
 ```
 
 {OUTPUT_SCHEMA}"""
 
+
 def parse_response(raw: str) -> dict:
     """Parse LLM response into a dict, handling common formatting issues."""
-    # Strip markdown fences if the model added them anyway
     clean = re.sub(r"```json|```", "", raw).strip()
     try:
         return json.loads(clean)
     except json.JSONDecodeError:
-        # Return a safe default if parsing fails
         return {
             "vulnerability_found": False,
             "cwe_id": None,
@@ -74,6 +89,7 @@ def parse_response(raw: str) -> dict:
             "confidence": 0.0,
             "hallucination_flag": True,
         }
+
 
 class LLMClient:
     def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 2000, temperature: float = 0):
