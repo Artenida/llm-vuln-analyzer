@@ -1,70 +1,83 @@
-import yaml
-from dataclasses import dataclass
+"""
+Configuration. Loads experiments/configs/default.yaml into typed dataclasses.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
+
+import yaml
 
 
 @dataclass
 class LLMConfig:
-    provider: str
-    model: str
-    max_tokens: int
-    temperature: float
+    provider: str = "openai"
+    model: str = "gpt-4o-mini"
+    max_tokens: int = 2000
+    temperature: float = 0.0
 
 
 @dataclass
-class DatasetConfig:
-    folder: str
-    limit: int | None
-    limit_per_cwe: int | None
-
-
-@dataclass
-class BigVulConfig:
-    enabled: bool
-    csv_path: str
-    limit_per_cwe: int | None
-    limit: int | None
-    languages: list[str] | None     # e.g. ["C", "C++"] or null for all
+class IngestionConfig:
+    max_function_lines: int = 200
+    skip_dirs: list[str] = field(default_factory=lambda: [
+        "node_modules", ".git", "__pycache__",
+        "vendor", "dist", "build",
+    ])
 
 
 @dataclass
 class OutputConfig:
-    folder: str
-    save_raw_response: bool
+    results_folder: str = "experiments/results"
+    save_per_run: bool = True
 
 
 @dataclass
 class AppConfig:
-    llm: LLMConfig
-    dataset: DatasetConfig
-    bigvul: BigVulConfig
-    output: OutputConfig
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    ingestion: IngestionConfig = field(default_factory=IngestionConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
 
 
-def load_config(config_path: str = "experiments/configs/default.yaml") -> AppConfig:
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+def load_config(path: Optional[str] = None) -> AppConfig:
+    """
+    Loads config from a YAML file.
+    Falls back to default values if the file does not exist.
+    """
+    if path is None:
+        path = os.path.join(
+            Path(__file__).parent.parent,
+            "experiments", "configs", "default.yaml",
+        )
 
-    with open(path) as f:
-        raw = yaml.safe_load(f)
+    config_path = Path(path)
+    if not config_path.exists():
+        return AppConfig()
 
-    ds = raw["dataset"]
-    bv = raw.get("bigvul", {})
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+
+    llm_raw = raw.get("llm", {})
+    ing_raw = raw.get("ingestion", {})
+    out_raw = raw.get("output", {})
 
     return AppConfig(
-        llm=LLMConfig(**raw["llm"]),
-        dataset=DatasetConfig(
-            folder=ds["folder"],
-            limit=ds.get("limit"),
-            limit_per_cwe=ds.get("limit_per_cwe"),
+        llm=LLMConfig(
+            provider=llm_raw.get("provider", "openai"),
+            model=llm_raw.get("model", "gpt-4o-mini"),
+            max_tokens=llm_raw.get("max_tokens", 2000),
+            temperature=llm_raw.get("temperature", 0.0),
         ),
-        bigvul=BigVulConfig(
-            enabled=bv.get("enabled", False),
-            csv_path=bv.get("csv_path", "data/raw/bigvul/MSR_data_cleaned.csv"),
-            limit_per_cwe=bv.get("limit_per_cwe", 20),
-            limit=bv.get("limit"),
-            languages=bv.get("languages"),
+        ingestion=IngestionConfig(
+            max_function_lines=ing_raw.get("max_function_lines", 200),
+            skip_dirs=ing_raw.get("skip_dirs", [
+                "node_modules", ".git", "__pycache__", "vendor", "dist", "build",
+            ]),
         ),
-        output=OutputConfig(**raw["output"]),
+        output=OutputConfig(
+            results_folder=out_raw.get("results_folder", "experiments/results"),
+            save_per_run=out_raw.get("save_per_run", True),
+        ),
     )

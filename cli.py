@@ -1,224 +1,190 @@
+"""
+CLI entry point.
+
+Commands:
+  analyze   Run vulnerability analysis on a path or snippet
+  show      Pretty-print a saved results JSON file
+"""
+from __future__ import annotations
+
 import json
-import typer
-from datetime import datetime
+import logging
+import sys
 from pathlib import Path
+from typing import Optional
+
+import typer
+
 from src.config import load_config
-from src.preprocessing.data_loader import load_juliet_folder, dataset_summary, CodeSample
-from src.preprocessing.bigvul_loader import load_bigvul_csv
-from src.llm.client import LLMClient, VulnerabilityReport
-from src.evaluation import evaluate_result_file, load_multiple_result_files, build_report, save_report, print_summary
+from src.ingestion.extractor import CodeExtractor
+from src.llm.client import LLMClient
+from src.results import save_run
 
-app = typer.Typer()
+app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
-def report_to_dict(sample: CodeSample, report: VulnerabilityReport) -> dict:
-    return {
-        "file": sample.file_path,
-        "method": sample.function_name,
-        "cwe_id": sample.cwe_id,
-        "ground_truth_vulnerable": sample.is_vulnerable,
-        "language": sample.language,
-        "llm_result": {
-            "vulnerability_found": report.vulnerability_found,
-            "cwe_id": report.cwe_id,
-            "affected_lines": report.affected_lines,
-            "severity": report.severity,
-            "explanation": report.explanation,
-            "patch_suggestion": report.patch_suggestion,
-            "confidence": report.confidence,
-            "hallucination_flag": report.hallucination_flag,
-            "model_used": report.model_used,
-        }
-    }
-
+# ── analyze ───────────────────────────────────────────────────────────────────
 
 @app.command()
 def analyze(
-    config_path: str = typer.Option(
-        "experiments/configs/default.yaml",
-        "--config", "-c",
-        help="Path to config YAML file",
+    path: Optional[str] = typer.Option(
+        None, "--path", "-p",
+        help="File or directory to analyse."
     ),
-    evaluate_after: bool = typer.Option(
-        True,
-        "--evaluate/--no-evaluate",
-        help="Run evaluation automatically after analysis finishes",
+    snippet: Optional[str] = typer.Option(
+        None, "--snippet", "-s",
+        help="Inline code string. Requires --language."
     ),
-    dataset: str = typer.Option(
-        "all",
-        "--dataset", "-d",
-        help="Which dataset to run: 'juliet', 'bigvul', or 'all'",
+    language: Optional[str] = typer.Option(
+        None, "--language", "-l",
+        help="Language for --snippet (python, javascript, c, cpp)."
+    ),
+    config_path: Optional[str] = typer.Option(
+        None, "--config", "-c",
+        help="Path to YAML config file."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Extract and report stats without calling the LLM."
     ),
 ):
     """
-    Analyze code samples for vulnerabilities using config file settings.
-
-    Examples:
-
-      # Run Juliet only (default)
-      python cli.py analyze --dataset juliet
-
-      # Run BigVul only
-      python cli.py analyze --dataset bigvul
-
-      # Run both (requires bigvul.enabled: true in config)
-      python cli.py analyze --dataset all
+    Analyse source code for security vulnerabilities.
     """
-    config = load_config(config_path)
-    typer.echo(f"Config loaded: {config_path}")
-    typer.echo(f"Model:         {config.llm.provider} / {config.llm.model}")
-
-    samples: list[CodeSample] = []
-
-    # ------------------------------------------------------------------ Juliet
-    if dataset in ("juliet", "all"):
-        typer.echo(f"\n[Juliet] Loading from {config.dataset.folder}")
-        juliet_samples = load_juliet_folder(
-            config.dataset.folder,
-            limit=config.dataset.limit,
-            limit_per_cwe=config.dataset.limit_per_cwe,
-        )
-        summary = dataset_summary(juliet_samples)
-        typer.echo(f"[Juliet] {summary['total']} samples  "
-                   f"({summary['vulnerable']} vulnerable, {summary['safe']} safe)")
-        typer.echo("  CWE breakdown:")
-        for cwe, count in summary["by_cwe"].items():
-            typer.echo(f"    {cwe:<12} {count} samples")
-        samples.extend(juliet_samples)
-
-    # ------------------------------------------------------------------ BigVul
-    if dataset in ("bigvul", "all"):
-        if not config.bigvul.enabled and dataset == "all":
-            typer.echo("\n[BigVul] Skipped (set bigvul.enabled: true in config to include)")
-        else:
-            typer.echo(f"\n[BigVul] Loading from {config.bigvul.csv_path}")
-            langs = set(config.bigvul.languages) if config.bigvul.languages else None
-            bigvul_samples = load_bigvul_csv(
-                csv_path=config.bigvul.csv_path,
-                limit_per_cwe=config.bigvul.limit_per_cwe,
-                limit=config.bigvul.limit,
-                languages=langs,
-            )
-            bv_summary = dataset_summary(bigvul_samples)
-            typer.echo(f"[BigVul] {bv_summary['total']} samples  "
-                       f"({bv_summary['vulnerable']} vulnerable, {bv_summary['safe']} safe)")
-            typer.echo("  CWE breakdown:")
-            for cwe, count in bv_summary["by_cwe"].items():
-                typer.echo(f"    {cwe:<12} {count} samples")
-            samples.extend(bigvul_samples)
-
-    if not samples:
-        typer.echo("\nNo samples loaded. Check your config and --dataset flag.")
+    if path is None and snippet is None:
+        typer.echo("Error: provide --path or --snippet", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"\nTotal samples to analyze: {len(samples)}")
-
-    # ------------------------------------------------------------------ Run LLM
-    client = LLMClient(
-        model=config.llm.model,
-        max_tokens=config.llm.max_tokens,
-        temperature=config.llm.temperature,
+    config = load_config(config_path)
+    extractor = CodeExtractor(
+        max_function_lines=config.ingestion.max_function_lines
     )
-    results = []
+
+    # ── extract ───────────────────────────────────────────────────────────────
+    if path:
+        typer.echo(f"\nIngesting  {path}")
+        samples = extractor.from_path(path)
+        source_label = path
+    else:
+        if not language:
+            typer.echo("Error: --language is required with --snippet", err=True)
+            raise typer.Exit(1)
+        samples = extractor.from_snippet(snippet, language)
+        source_label = "<snippet>"
+
+    if not samples:
+        typer.echo("No functions extracted. Check the path and language support.")
+        raise typer.Exit(1)
+
+    # ── dry-run report ────────────────────────────────────────────────────────
+    lang_counts: dict[str, int] = {}
+    for s in samples:
+        lang_counts[s.language.value] = lang_counts.get(s.language.value, 0) + 1
+
+    typer.echo(f"\nExtraction summary")
+    typer.echo(f"  Functions : {len(samples)}")
+    for lang, count in sorted(lang_counts.items()):
+        typer.echo(f"  {lang:<12}: {count}")
+
+    if dry_run:
+        typer.echo("\nDry run — no LLM calls made.")
+        raise typer.Exit(0)
+
+    # ── analyse ───────────────────────────────────────────────────────────────
+    typer.echo(f"\nAnalysing {len(samples)} function(s) with {config.llm.model}…\n")
+    client = LLMClient(config.llm)
+    reports = []
 
     for i, sample in enumerate(samples, 1):
-        typer.echo(f"[{i}/{len(samples)}] {sample.function_name}")
+        label = f"{sample.function_name or '?'} ({sample.language.value})"
+        typer.echo(f"  [{i:>3}/{len(samples)}]  {label}", nl=False)
         report = client.analyze(sample)
-        results.append(report_to_dict(sample, report))
+        reports.append(report)
 
-    # ------------------------------------------------------------------ Save
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = f"{config.output.folder}/analysis_{config.llm.model}_{timestamp}.json"
-    Path(config.output.folder).mkdir(parents=True, exist_ok=True)
+        status = "VULN" if report.vulnerability_found else "clean"
+        conf   = f"{report.confidence:.2f}"
+        typer.echo(f"  →  {status}  conf={conf}")
 
-    result_data = {
-        "metadata": {
-            "model": config.llm.model,
-            "provider": config.llm.provider,
-            "total_samples": len(results),
-            "timestamp": datetime.now().isoformat(),
-            "datasets_used": dataset,
-            "config_used": config_path,
-        },
-        "results": results,
-    }
+    # ── save results ──────────────────────────────────────────────────────────
+    out_path = save_run(
+        reports=reports,
+        samples=samples,
+        source_path=source_label,
+        model=config.llm.model,
+        results_folder=config.output.results_folder,
+    )
 
-    with open(output_path, "w") as f:
-        json.dump(result_data, f, indent=2)
+    # ── print summary ─────────────────────────────────────────────────────────
+    found = [r for r in reports if r.vulnerability_found]
+    typer.echo(f"\n{'─'*50}")
+    typer.echo(f"  Total analysed : {len(reports)}")
+    typer.echo(f"  Vulnerabilities: {len(found)}")
+    typer.echo(f"  Clean          : {len(reports) - len(found)}")
+    typer.echo(f"  Results saved  → {out_path}")
 
-    typer.echo(f"\nDone. Results saved to: {output_path}")
+    if found:
+        typer.echo(f"\nFindings:")
+        for r in found:
+            sev = r.severity or "?"
+            cwe = r.cwe_id or "unknown CWE"
+            typer.echo(f"  [{sev.upper():>8}]  {r.function_name}  ({cwe})")
+            typer.echo(f"             {r.file_path}")
+            typer.echo(f"             {r.explanation[:120]}…" if len(r.explanation) > 120 else f"             {r.explanation}")
 
-    # --------------------------------------------------------- Auto-evaluate
-    if evaluate_after:
-        typer.echo("\nRunning evaluation...")
-        eval_output = (
-            output_path
-            .replace(config.output.folder, f"{config.output.folder}/evaluations")
-            .replace("analysis_", "eval_")
-        )
-        evaluate_result_file(
-            result_path=output_path,
-            output_path=eval_output,
-            print_to_console=True,
-        )
 
+# ── show ──────────────────────────────────────────────────────────────────────
 
 @app.command()
-def evaluate(
-    result_path: str = typer.Argument(
-        ...,
-        help="Path to an analysis JSON file produced by the 'analyze' command",
-    ),
-    output_path: str = typer.Option(
-        None,
-        "--output", "-o",
-        help="Where to save the evaluation report JSON (optional)",
-    ),
-    compare: list[str] = typer.Option(
-        None,
-        "--compare",
-        help="Additional result files to merge and evaluate together",
+def show(
+    result_file: str = typer.Argument(..., help="Path to a results JSON file."),
+    only_vulns: bool = typer.Option(
+        False, "--vulns-only", help="Only show vulnerable findings."
     ),
 ):
     """
-    Evaluate a result file and print a metrics report.
-
-    Examples:
-
-      # Evaluate a single result file
-      python cli.py evaluate experiments/results/analysis_gpt-4o-mini_20260502.json
-
-      # Evaluate and save the report
-      python cli.py evaluate experiments/results/analysis_gpt-4o-mini_20260502.json \\
-          --output experiments/results/evaluations/eval_20260502.json
-
-      # Merge and compare two runs (e.g. Juliet vs BigVul)
-      python cli.py evaluate experiments/results/juliet_run.json \\
-          --compare experiments/results/bigvul_run.json
+    Pretty-print a saved results JSON file.
     """
-    if compare:
-        all_paths = [result_path] + list(compare)
-        typer.echo(f"Merging {len(all_paths)} result files...")
-        merged_meta, results = load_multiple_result_files(all_paths)
-        report = build_report(results, metadata=merged_meta)
+    p = Path(result_file)
+    if not p.exists():
+        typer.echo(f"File not found: {p}", err=True)
+        raise typer.Exit(1)
 
-        if output_path:
-            saved = save_report(report, output_path)
-            typer.echo(f"Report saved to: {saved}")
+    with open(p) as f:
+        data = json.load(f)
 
-        print_summary(report)
-    else:
-        if output_path is None:
-            p = Path(result_path)
-            output_path = str(
-                p.parent / "evaluations" / p.name.replace("analysis_", "eval_")
-            )
+    typer.echo(f"\nRun:     {data.get('run_id')}")
+    typer.echo(f"Model:   {data.get('model')}")
+    typer.echo(f"Source:  {data.get('source_path')}")
+    typer.echo(f"Time:    {data.get('timestamp')}")
 
-        evaluate_result_file(
-            result_path=result_path,
-            output_path=output_path,
-            print_to_console=True,
+    summary = data.get("summary", {})
+    typer.echo(f"\nSummary")
+    typer.echo(f"  Total     : {summary.get('total_functions')}")
+    typer.echo(f"  Vulnerable: {summary.get('vulnerabilities_found')}")
+    typer.echo(f"  Clean     : {summary.get('clean')}")
+    typer.echo(f"  Errors    : {summary.get('errors')}")
+
+    findings = data.get("findings", [])
+    if only_vulns:
+        findings = [f for f in findings if f.get("vulnerability_found")]
+
+    typer.echo(f"\nFindings ({len(findings)}):")
+    for f in findings:
+        marker = "VULN " if f.get("vulnerability_found") else "clean"
+        typer.echo(
+            f"  [{marker}]  {f.get('function_name')}  "
+            f"cwe={f.get('cwe_id')}  conf={f.get('confidence', 0):.2f}  "
+            f"sev={f.get('severity')}"
         )
+        if f.get("explanation"):
+            typer.echo(f"           {f['explanation'][:100]}")
 
 
 if __name__ == "__main__":

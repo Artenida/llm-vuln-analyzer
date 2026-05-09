@@ -1,141 +1,162 @@
-import os
-import json
-import re
-from dataclasses import dataclass
-from dotenv import load_dotenv
-from openai import OpenAI
-from src.preprocessing.data_loader import CodeSample
+"""
+LLM client.
+Sends a prompt to the configured LLM and parses the JSON response
+into a VulnerabilityReport.
+"""
+from __future__ import annotations
 
-load_dotenv()
+import json
+import logging
+import os
+from dataclasses import asdict, dataclass
+from typing import Optional
+
+import openai
+
+from src.config import LLMConfig
+from src.models import CodeSample
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class VulnerabilityReport:
+    function_name: Optional[str]
+    file_path: Optional[str]
+    language: str
+
     vulnerability_found: bool
-    cwe_id: str | None
+    cwe_id: Optional[str]
     affected_lines: list[int]
-    severity: str | None
+    severity: Optional[str]           # low / medium / high / critical
     explanation: str
     patch_suggestion: str
     confidence: float
     hallucination_flag: bool
-    raw_response: str
-    model_used: str
+
+    # set by pipeline, not LLM
+    analysis_mode: str = "single_function"
+    error: Optional[str] = None
 
 
-SYSTEM_PROMPT = """You are a security-focused code reviewer with deep knowledge
-of the MITRE CWE taxonomy and software security vulnerabilities across multiple
-programming languages including Java, C, C++, Python, and JavaScript.
+_SAFE_REPORT = VulnerabilityReport(
+    function_name=None, file_path=None, language="unknown",
+    vulnerability_found=False, cwe_id=None, affected_lines=[],
+    severity=None, explanation="Parse error — could not read LLM response.",
+    patch_suggestion="", confidence=0.0, hallucination_flag=True,
+    error="json_parse_error",
+)
 
-Analyze the provided code for security vulnerabilities.
-Be precise and conservative — only report what you can directly
-justify from the code. Do not speculate."""
+SYSTEM_PROMPT = (
+    "You are a security-focused code reviewer. "
+    "Respond ONLY with a valid JSON object. "
+    "Do not include markdown, prose, or text outside the JSON."
+)
 
-OUTPUT_SCHEMA = """
-Respond ONLY with a valid JSON object. No explanation before or after.
-No markdown fences. Just the raw JSON:
+USER_PROMPT_TEMPLATE = """\
+Analyse the following {language} code for security vulnerabilities.
 
-{
-  "vulnerability_found": true or false,
-  "cwe_id": "CWE-XX" or null,
-  "affected_lines": [list of line numbers, or empty list],
-  "severity": "low" or "medium" or "high" or "critical" or null,
-  "explanation": "what is wrong and why, or why it is safe",
-  "patch_suggestion": "concrete fix, or null if no vulnerability",
-  "confidence": 0.0 to 1.0,
-  "hallucination_flag": true if you are guessing, false if you are certain
-}
+{context_sections}
+
+Respond with this exact JSON schema:
+{{
+  "vulnerability_found": boolean,
+  "cwe_id": string or null,
+  "affected_lines": [list of integers],
+  "severity": "low" | "medium" | "high" | "critical" | null,
+  "explanation": string,
+  "patch_suggestion": string,
+  "confidence": float between 0.0 and 1.0,
+  "hallucination_flag": boolean
+}}
 """
-
-# Language display names for the prompt
-LANGUAGE_LABELS = {
-    "java":       "Java",
-    "c":          "C",
-    "c++":        "C++",
-    "cpp":        "C++",
-    "python":     "Python",
-    "javascript": "JavaScript",
-    "js":         "JavaScript",
-    "php":        "PHP",
-}
-
-
-def build_user_prompt(sample: CodeSample) -> str:
-    lang_label = LANGUAGE_LABELS.get(sample.language.lower(), sample.language.upper())
-    return f"""Analyze this {lang_label} function for security vulnerabilities.
-
-### Method: `{sample.function_name}`
-### CWE context: This sample is from a dataset covering {sample.cwe_id} vulnerabilities.
-
-```{sample.language.lower()}
-{sample.source_code}
-```
-
-{OUTPUT_SCHEMA}"""
-
-
-def parse_response(raw: str) -> dict:
-    """Parse LLM response into a dict, handling common formatting issues."""
-    clean = re.sub(r"```json|```", "", raw).strip()
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError:
-        return {
-            "vulnerability_found": False,
-            "cwe_id": None,
-            "affected_lines": [],
-            "severity": None,
-            "explanation": "Failed to parse model response.",
-            "patch_suggestion": None,
-            "confidence": 0.0,
-            "hallucination_flag": True,
-        }
 
 
 class LLMClient:
-    def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 2000, temperature: float = 0):
-        self.model = model
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    def __init__(self, config: LLMConfig):
+        self.config = config
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise EnvironmentError(
+                "OPENAI_API_KEY environment variable is not set."
+            )
+        self.client = openai.OpenAI(api_key=api_key)
 
-    def analyze(self, sample: CodeSample) -> VulnerabilityReport:
-        user_prompt = build_user_prompt(sample)
+    def analyze(self, sample: CodeSample,
+                context_prompt: Optional[str] = None) -> VulnerabilityReport:
+        """
+        Analyzes a CodeSample.
+        If context_prompt is provided (Phase 2+), it is used as the full
+        user message. Otherwise a minimal single-function prompt is built.
+        """
+        if context_prompt is not None:
+            user_message = context_prompt
+        else:
+            user_message = self._build_single_prompt(sample)
+
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=self.config.model,
+                max_tokens=self.config.max_tokens,
+                temperature=self.config.temperature,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_prompt},
+                    {"role": "user",   "content": user_message},
                 ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
             )
-            raw = response.choices[0].message.content
-        except Exception as e:
-            print(f"API error for {sample.function_name}: {e}")
-            return VulnerabilityReport(
-                vulnerability_found=False,
-                cwe_id=None,
-                affected_lines=[],
-                severity=None,
-                explanation=f"API error: {str(e)}",
-                patch_suggestion=None,
-                confidence=0.0,
-                hallucination_flag=True,
-                raw_response=str(e),
-                model_used=self.model,
-            )
+            raw = response.choices[0].message.content or ""
+            return self._parse_response(raw, sample)
 
-        parsed = parse_response(raw)
+        except openai.OpenAIError as e:
+            logger.error("OpenAI API error: %s", e)
+            report = _SAFE_REPORT
+            report.function_name = sample.function_name
+            report.file_path = sample.file_path
+            report.language = sample.language.value
+            report.error = f"api_error: {e}"
+            return report
+
+    # ── prompt builders ───────────────────────────────────────────────────────
+
+    def _build_single_prompt(self, sample: CodeSample) -> str:
+        code_section = f"## Function to analyse\n```\n{sample.code}\n```"
+        return USER_PROMPT_TEMPLATE.format(
+            language=sample.language.value,
+            context_sections=code_section,
+        )
+
+    # ── response parser ───────────────────────────────────────────────────────
+
+    def _parse_response(self, raw: str, sample: CodeSample) -> VulnerabilityReport:
+        # strip markdown code fences if present
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(
+                line for line in lines
+                if not line.startswith("```")
+            ).strip()
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.warning("JSON parse error: %s | raw: %.200s", e, raw)
+            report = _SAFE_REPORT
+            report.function_name = sample.function_name
+            report.file_path = sample.file_path
+            report.language = sample.language.value
+            return report
+
         return VulnerabilityReport(
-            vulnerability_found=parsed.get("vulnerability_found", False),
-            cwe_id=parsed.get("cwe_id"),
-            affected_lines=parsed.get("affected_lines", []),
-            severity=parsed.get("severity"),
-            explanation=parsed.get("explanation", ""),
-            patch_suggestion=parsed.get("patch_suggestion"),
-            confidence=parsed.get("confidence", 0.0),
-            hallucination_flag=parsed.get("hallucination_flag", False),
-            raw_response=raw,
-            model_used=self.model,
+            function_name=sample.function_name,
+            file_path=sample.file_path,
+            language=sample.language.value,
+            vulnerability_found=bool(data.get("vulnerability_found", False)),
+            cwe_id=data.get("cwe_id"),
+            affected_lines=data.get("affected_lines", []),
+            severity=data.get("severity"),
+            explanation=data.get("explanation", ""),
+            patch_suggestion=data.get("patch_suggestion", ""),
+            confidence=float(data.get("confidence", 0.0)),
+            hallucination_flag=bool(data.get("hallucination_flag", False)),
         )

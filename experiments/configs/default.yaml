@@ -1,33 +1,21 @@
-# LLM configuration
 llm:
   provider: openai
   model: gpt-4o-mini
   max_tokens: 2000
-  temperature: 0
+  temperature: 0          # deterministic output
 
-# Juliet dataset configuration
-dataset:
-  folder: data/raw/juliet/juliet/Java/src/testcases
-  limit_per_cwe: 20
-  limit: null
+ingestion:
+  max_function_lines: 200
+  skip_dirs:
+    - node_modules
+    - .git
+    - __pycache__
+    - vendor
+    - dist
+    - build
+    - .next
+    - coverage
 
-# BigVul dataset configuration
-bigvul:
-  enabled: true            # set to true to include BigVul in the run
-  csv_path: data/raw/bigvul/MSR_data_cleaned.csv
-  limit_per_cwe: 10         # 10 vuln + 10 safe per CWE = 20 per CWE
-  limit: null               # null = use limit_per_cwe only
-  languages:                # null = all languages; or restrict e.g.:
-    - C
-    - C++
-
-# Output configuration
 output:
-  folder: experiments/results
-  save_raw_response: true
-
-# Evaluation configuration
-evaluation:
-  auto_evaluate: true
-  output_folder: experiments/results/evaluations
-  min_coverage_pct: 80
+  results_folder: experiments/results
+  save_per_run: true
