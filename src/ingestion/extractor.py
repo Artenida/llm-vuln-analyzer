@@ -119,6 +119,10 @@ class CodeExtractor:
                 file_path=file_path,
                 start_line=fn.start_line,
                 end_line=fn.end_line,
+
+                # NEW
+                ast_node=fn.ast_node,
+                raw_content=content,
             ))
 
         return samples

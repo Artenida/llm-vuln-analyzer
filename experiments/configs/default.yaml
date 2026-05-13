@@ -18,4 +18,13 @@ ingestion:
 
 output:
   results_folder: experiments/results
+
+  extraction_folder: experiments/results/extraction
+
+  context_folder: experiments/results/context
+
+  analysis_folder: experiments/results/analysis
+
+  evaluation_folder: experiments/results/evaluation
+
   save_per_run: true

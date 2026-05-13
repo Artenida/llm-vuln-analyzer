@@ -31,8 +31,16 @@ class IngestionConfig:
 @dataclass
 class OutputConfig:
     results_folder: str = "experiments/results"
-    save_per_run: bool = True
 
+    extraction_folder: str = "experiments/results/extraction"
+
+    context_folder: str = "experiments/results/context"
+
+    analysis_folder: str = "experiments/results/analysis"
+
+    evaluation_folder: str = "experiments/results/evaluation"
+
+    save_per_run: bool = True
 
 @dataclass
 class AppConfig:
@@ -77,7 +85,34 @@ def load_config(path: Optional[str] = None) -> AppConfig:
             ]),
         ),
         output=OutputConfig(
-            results_folder=out_raw.get("results_folder", "experiments/results"),
-            save_per_run=out_raw.get("save_per_run", True),
+            results_folder=out_raw.get(
+                "results_folder",
+                "experiments/results",
+            ),
+
+            extraction_folder=out_raw.get(
+                "extraction_folder",
+                "experiments/results/extraction",
+            ),
+
+            context_folder=out_raw.get(
+                "context_folder",
+                "experiments/results/context",
+            ),
+
+            analysis_folder=out_raw.get(
+                "analysis_folder",
+                "experiments/results/analysis",
+            ),
+
+            evaluation_folder=out_raw.get(
+                "evaluation_folder",
+                "experiments/results/evaluation",
+            ),
+
+            save_per_run=out_raw.get(
+                "save_per_run",
+                True,
+            ),
         ),
     )

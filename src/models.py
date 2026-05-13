@@ -2,7 +2,7 @@
 Core data models shared across the pipeline.
 """
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Any
 from enum import Enum
 
 
@@ -18,7 +18,7 @@ EXTENSION_MAP = {
     ".py":   Language.PYTHON,
     ".js":   Language.JAVASCRIPT,
     ".mjs":  Language.JAVASCRIPT,
-    ".ts":   Language.JAVASCRIPT,   # treat ts as js for now
+    ".ts":   Language.JAVASCRIPT,
     ".jsx":  Language.JAVASCRIPT,
     ".tsx":  Language.JAVASCRIPT,
     ".c":    Language.C,
@@ -33,16 +33,21 @@ EXTENSION_MAP = {
 class CodeSample:
     """
     One extracted function, ready for analysis.
-    label is -1 when unknown (real-world code), 1 when vulnerable, 0 when safe.
     """
+
     code: str
     language: Language
-    source: str                           # "file", "snippet"
+    source: str
 
     function_name: Optional[str] = None
     file_path: Optional[str] = None
+
     start_line: Optional[int] = None
     end_line: Optional[int] = None
 
-    # set after analysis
-    label: int = -1                       # -1=unknown, 0=safe, 1=vulnerable
+    # NEW ───────────────────────────────────────────────
+    ast_node: Optional[Any] = None
+    raw_content: Optional[str] = None
+
+    # analysis metadata
+    label: int = -1

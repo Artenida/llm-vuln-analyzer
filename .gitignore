@@ -16,6 +16,7 @@ data/rag_corpus/embeddings/
 
 # Experiment outputs
 experiments/results/
+experiments/datasets/
 
 # Editors
 .vscode/
