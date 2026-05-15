@@ -110,9 +110,17 @@ def _extract_name(node: Node, language: str,
         for child in node.children:
             if child.type == "identifier":
                 return node_text(child, source_bytes)
-
+        
         parent = node.parent
 
+        if parent.type in {
+            "call_expression",
+            "arguments",
+            "statement_block",
+            "program",
+        }:
+            return "<anonymous>"
+        
         if parent:
 
             for child in parent.children:
