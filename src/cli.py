@@ -2,9 +2,10 @@
 CLI entry point.
 
 Commands:
-  analyze   Run vulnerability analysis on a path or snippet
-  show      Pretty-print a saved results JSON file
+  analyze    Run vulnerability analysis on a path or snippet
+  show       Pretty-print a saved results JSON file
 """
+
 from __future__ import annotations
 
 import json
@@ -16,11 +17,12 @@ import typer
 
 from src.config import load_config
 from src.context.call_graph import CallGraphBuilder
-from src.context.results import save_call_graph
 from src.ingestion.extractor import CodeExtractor
-from src.ingestion.results import save_extraction_results
+from src.results import save_extraction_results, save_run, save_call_graph
 from src.llm.client import LLMClient
-from src.results import save_run
+
+from src.agent.react_loop import ReActAgent
+from src.agent.tools import ToolSet
 
 app = typer.Typer(
     add_completion=False,
@@ -79,7 +81,7 @@ def analyze(
     build_context: bool = typer.Option(
         False,
         "--build-context",
-        help="Build and save call graph context."
+        help="Build call graph context before analysis."
     ),
 ):
     """
@@ -87,10 +89,7 @@ def analyze(
     """
 
     if path is None and snippet is None:
-        typer.echo(
-            "Error: provide --path or --snippet",
-            err=True
-        )
+        typer.echo("Error: provide --path or --snippet", err=True)
         raise typer.Exit(1)
 
     config = load_config(config_path)
@@ -100,19 +99,17 @@ def analyze(
     )
 
     # ─────────────────────────────────────────────────────────
-    # extract
+    # extraction
     # ─────────────────────────────────────────────────────────
 
     if path:
-
-        typer.echo(f"\nIngesting  {path}")
+        typer.echo(f"\nIngesting {path}")
 
         samples = extractor.from_path(path)
 
         source_label = path
 
     else:
-
         if not language:
             typer.echo(
                 "Error: --language is required with --snippet",
@@ -128,35 +125,28 @@ def analyze(
         source_label = "<snippet>"
 
     if not samples:
-        typer.echo(
-            "No functions extracted. "
-            "Check the path and language support."
-        )
+        typer.echo("No functions extracted.")
         raise typer.Exit(1)
 
     # ─────────────────────────────────────────────────────────
     # extraction summary
     # ─────────────────────────────────────────────────────────
 
-    lang_counts: dict[str, int] = {}
+    lang_counts = {}
 
     for s in samples:
         lang_counts[s.language.value] = (
             lang_counts.get(s.language.value, 0) + 1
         )
 
-    typer.echo(f"\nExtraction summary")
-
+    typer.echo("\nExtraction summary")
     typer.echo(f"  Functions : {len(samples)}")
 
     for lang, count in sorted(lang_counts.items()):
+        typer.echo(f"  {lang:<12}: {count}")
 
-        typer.echo(
-            f"  {lang:<12}: {count}"
-        )
-    
     # ─────────────────────────────────────────────────────────
-    # save extraction results
+    # save extraction
     # ─────────────────────────────────────────────────────────
 
     extraction_out = save_extraction_results(
@@ -165,13 +155,13 @@ def analyze(
         output_folder=config.output.extraction_folder,
     )
 
-    typer.echo(
-        f"\nExtraction results saved → {extraction_out}"
-    )
+    typer.echo(f"\nExtraction saved → {extraction_out}")
 
     # ─────────────────────────────────────────────────────────
-    # build context graph
+    # build call graph
     # ─────────────────────────────────────────────────────────
+
+    graph = {}
 
     if build_context:
 
@@ -188,75 +178,81 @@ def analyze(
         )
 
         typer.echo(
-            f"Context graph saved → {context_out}"
+            f"Call graph built successfully "
+            f"({len(graph)} nodes)"
         )
 
-        typer.echo("\nCall graph summary")
-
-        for name, node in graph.items():
-
-            typer.echo(f"  {name}")
-
-            typer.echo(
-                f"    callers: {node.callers}"
-            )
-
-            typer.echo(
-                f"    callees: {node.callees}"
-            )
+        typer.echo(f"Call graph saved → {context_out}")
 
     # ─────────────────────────────────────────────────────────
     # dry run
     # ─────────────────────────────────────────────────────────
 
     if dry_run:
-
-        typer.echo(
-            "\nDry run complete — no LLM calls made."
-        )
-
+        typer.echo("\nDry run complete — no LLM calls made.")
         raise typer.Exit(0)
 
     # ─────────────────────────────────────────────────────────
-    # analyse
+    # LLM setup
     # ─────────────────────────────────────────────────────────
 
     typer.echo(
-        f"\nAnalysing {len(samples)} "
-        f"function(s) with {config.llm.model}…\n"
+        f"\nAnalyzing with {config.llm.model}...\n"
     )
 
     client = LLMClient(config.llm)
 
+    tools = ToolSet(graph)
+
+    agent = ReActAgent(
+        llm=client,
+        tools=tools,
+    )
+
     reports = []
+
+    # ─────────────────────────────────────────────────────────
+    # analysis loop
+    # ─────────────────────────────────────────────────────────
 
     for i, sample in enumerate(samples, 1):
 
-        label = (
-            f"{sample.function_name or '?'} "
-            f"({sample.language.value})"
-        )
-
         typer.echo(
-            f"  [{i:>3}/{len(samples)}]  {label}",
+            f"  [{i}/{len(samples)}] "
+            f"{sample.function_name}",
             nl=False
         )
 
-        report = client.analyze(sample)
+        try:
 
-        reports.append(report)
+            if build_context:
+                report = agent.run(sample, graph)
 
-        status = (
-            "VULN"
-            if report.vulnerability_found
-            else "clean"
-        )
+            else:
+                report = client.analyze(sample)
 
-        conf = f"{report.confidence:.2f}"
+            reports.append(report)
 
-        typer.echo(
-            f"  →  {status}  conf={conf}"
-        )
+            status = (
+                "VULN"
+                if report.vulnerability_found
+                else "clean"
+            )
+
+            typer.echo(
+                f" → {status} "
+                f"({report.confidence:.2f})"
+            )
+
+        except Exception as e:
+
+            typer.echo(" → ERROR")
+
+            logger.error(
+                "Analysis failed for %s: %s",
+                sample.function_name,
+                e,
+            )
 
     # ─────────────────────────────────────────────────────────
     # save results
@@ -279,28 +275,22 @@ def analyze(
         if r.vulnerability_found
     ]
 
-    typer.echo(f"\n{'─' * 50}")
+    typer.echo("\n" + "─" * 50)
+
+    typer.echo(f"Total analysed : {len(reports)}")
+
+    typer.echo(f"Vulnerabilities: {len(found)}")
 
     typer.echo(
-        f"  Total analysed : {len(reports)}"
-    )
-
-    typer.echo(
-        f"  Vulnerabilities: {len(found)}"
-    )
-
-    typer.echo(
-        f"  Clean          : "
+        f"Clean          : "
         f"{len(reports) - len(found)}"
     )
 
-    typer.echo(
-        f"  Results saved  → {out_path}"
-    )
+    typer.echo(f"Results saved  → {out_path}")
 
     if found:
 
-        typer.echo(f"\nFindings:")
+        typer.echo("\nFindings:")
 
         for r in found:
 
@@ -309,27 +299,12 @@ def analyze(
             cwe = r.cwe_id or "unknown CWE"
 
             typer.echo(
-                f"  [{sev.upper():>8}]  "
-                f"{r.function_name}  ({cwe})"
+                f"  [{sev.upper():>8}] "
+                f"{r.function_name} ({cwe})"
             )
 
-            typer.echo(
-                f"             {r.file_path}"
-            )
-
-            if len(r.explanation) > 120:
-
-                typer.echo(
-                    f"             "
-                    f"{r.explanation[:120]}…"
-                )
-
-            else:
-
-                typer.echo(
-                    f"             "
-                    f"{r.explanation}"
-                )
+            if r.file_path:
+                typer.echo(f"             {r.file_path}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -338,20 +313,13 @@ def analyze(
 
 @app.command()
 def show(
-    result_file: str = typer.Argument(
-        ...,
-        help="Path to a results JSON file."
-    ),
+    result_file: str = typer.Argument(...),
 
     only_vulns: bool = typer.Option(
         False,
-        "--vulns-only",
-        help="Only show vulnerable findings."
+        "--vulns-only"
     ),
 ):
-    """
-    Pretty-print a saved results JSON file.
-    """
 
     p = Path(result_file)
 
@@ -359,38 +327,38 @@ def show(
         typer.echo(f"File not found: {p}", err=True)
         raise typer.Exit(1)
 
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         data = json.load(f)
 
-    typer.echo(f"\nRun:     {data.get('run_id')}")
+    typer.echo(f"\nRun:    {data.get('run_id')}")
 
-    typer.echo(f"Model:   {data.get('model')}")
+    typer.echo(f"Model:  {data.get('model')}")
 
-    typer.echo(f"Source:  {data.get('source_path')}")
+    typer.echo(f"Source: {data.get('source_path')}")
 
-    typer.echo(f"Time:    {data.get('timestamp')}")
+    typer.echo(f"Time:   {data.get('timestamp')}")
 
     summary = data.get("summary", {})
 
-    typer.echo(f"\nSummary")
+    typer.echo("\nSummary")
 
     typer.echo(
-        f"  Total     : "
+        f"  Total       : "
         f"{summary.get('total_functions')}"
     )
 
     typer.echo(
-        f"  Vulnerable: "
+        f"  Vulnerable  : "
         f"{summary.get('vulnerabilities_found')}"
     )
 
     typer.echo(
-        f"  Clean     : "
+        f"  Clean       : "
         f"{summary.get('clean')}"
     )
 
     typer.echo(
-        f"  Errors    : "
+        f"  Errors      : "
         f"{summary.get('errors')}"
     )
 
@@ -407,23 +375,22 @@ def show(
     for f in findings:
 
         marker = (
-            "VULN "
+            "VULN"
             if f.get("vulnerability_found")
             else "clean"
         )
 
         typer.echo(
-            f"  [{marker}]  "
-            f"{f.get('function_name')}  "
-            f"cwe={f.get('cwe_id')}  "
-            f"conf={f.get('confidence', 0):.2f}  "
+            f"  [{marker}] "
+            f"{f.get('function_name')} "
+            f"cwe={f.get('cwe_id')} "
+            f"conf={f.get('confidence', 0):.2f} "
             f"sev={f.get('severity')}"
         )
 
         if f.get("explanation"):
-
             typer.echo(
-                f"           "
+                f"       "
                 f"{f['explanation'][:100]}"
             )
 

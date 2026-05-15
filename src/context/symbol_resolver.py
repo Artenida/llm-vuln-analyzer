@@ -1,33 +1,14 @@
-"""
-Very lightweight symbol resolution for Phase 2A.
-"""
-
-from tree_sitter import Node
-
-
 class SymbolResolver:
+    def resolve(self, raw: str) -> str:
+        if not raw:
+            return raw
 
-    def resolve(self, raw_name: str) -> str:
-        """
-        First version:
-        - strips spaces
-        - strips call syntax
-        - normalizes method calls
+        raw = raw.strip()
 
-        Example:
-            "db.execute" -> "execute"
-            "foo()" -> "foo"
-        """
+        if raw.endswith("()"):
+            raw = raw[:-2]
 
-        if not raw_name:
-            return raw_name
+        if "." in raw:
+            raw = raw.split(".")[-1]
 
-        raw_name = raw_name.strip()
-
-        if raw_name.endswith("()"):
-            raw_name = raw_name[:-2]
-
-        if "." in raw_name:
-            raw_name = raw_name.split(".")[-1]
-
-        return raw_name
+        return raw
