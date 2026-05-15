@@ -8,7 +8,5 @@ class SymbolResolver:
         if raw.endswith("()"):
             raw = raw[:-2]
 
-        if "." in raw:
-            raw = raw.split(".")[-1]
-
+        # ❌ DO NOT strip module context anymore
         return raw

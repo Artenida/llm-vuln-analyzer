@@ -258,39 +258,37 @@ class TreeSitterParser:
 
         return results
 
-    def extract_call_names(self,
-                           node: Node,
-                           language: str,
-                           source_bytes: bytes) -> list[str]:
+    def extract_call_names(self, node: Node, language: str, source_bytes: bytes) -> list[str]:
 
         call_types = CALL_NODE_TYPES.get(language, set())
-
         results = []
 
         def walk(n: Node):
 
             if n.type in call_types:
 
-                if language == "python":
+                func = n.child_by_field_name("function")
 
-                    func = n.child_by_field_name("function")
+                if func:
 
-                    if func:
-                        results.append(
-                            node_text(func, source_bytes)
-                        )
+                    # ─────────────────────────────────────────────
+                    # FIX 1: JavaScript member_expression support
+                    # ─────────────────────────────────────────────
+                    if func.type == "member_expression":
 
-                else:
-                    func = n.child_by_field_name("function")
+                        obj = func.child_by_field_name("object")
+                        prop = func.child_by_field_name("property")
 
-                    if func:
-                        results.append(
-                            node_text(func, source_bytes)
-                        )
+                        if obj and prop:
+                            results.append(
+                                f"{node_text(obj, source_bytes)}.{node_text(prop, source_bytes)}"
+                            )
+
+                    else:
+                        results.append(node_text(func, source_bytes))
 
             for child in n.children:
                 walk(child)
 
         walk(node)
-
         return results

@@ -157,11 +157,12 @@ def analyze(
 
     typer.echo(f"\nExtraction saved → {extraction_out}")
 
-    # ─────────────────────────────────────────────────────────
-    # build call graph
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # call graph (SAFE INITIALIZATION)
+    # ─────────────────────────────────────────────
 
     graph = {}
+    name_index = {}
 
     if build_context:
 
@@ -169,7 +170,7 @@ def analyze(
 
         graph_builder = CallGraphBuilder()
 
-        graph = graph_builder.build(samples)
+        graph, name_index = graph_builder.build(samples)
 
         context_out = save_call_graph(
             graph=graph,
@@ -202,7 +203,8 @@ def analyze(
 
     client = LLMClient(config.llm)
 
-    tools = ToolSet(graph)
+    # IMPORTANT FIX: only build tools if graph exists
+    tools = ToolSet(graph, name_index) if build_context else None
 
     agent = ReActAgent(
         llm=client,
@@ -225,7 +227,7 @@ def analyze(
 
         try:
 
-            if build_context:
+            if build_context and tools is not None:
                 report = agent.run(sample, graph)
 
             else:
