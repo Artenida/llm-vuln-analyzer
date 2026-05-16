@@ -114,7 +114,6 @@ class CodeExtractor:
             samples.append(CodeSample(
                 code=fn.body,
                 language=language,
-                source="file" if file_path != "<snippet>" else "snippet",
                 function_name=fn.name,
                 file_path=file_path,
                 start_line=fn.start_line,

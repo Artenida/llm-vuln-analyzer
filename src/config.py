@@ -48,6 +48,9 @@ class AppConfig:
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
+    @property
+    def openai_api_key(self) -> str | None:
+        return os.environ.get("OPENAI_API_KEY")
 
 def load_config(path: Optional[str] = None) -> AppConfig:
     """

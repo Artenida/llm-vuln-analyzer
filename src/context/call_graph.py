@@ -4,6 +4,7 @@ from typing import Dict, List, Set, Tuple
 
 from src.models import CodeSample
 from src.context.symbol_resolver import SymbolResolver
+from src.context.llm_edge_resolver import LLMEdgeResolver
 from src.ingestion.parser import TreeSitterParser
 
 logger = logging.getLogger(__name__)
@@ -30,12 +31,15 @@ class CallGraphNode:
 
 ENTRY_POINT_PATTERNS = ["handler", "route", "endpoint", "controller", "main"]
 
+INFRASTRUCTURE_PATTERNS = ["execute", "query", "connect", "disconnect"]
+
 
 class CallGraphBuilder:
 
-    def __init__(self):
+    def __init__(self, api_key: str = None):
         self.parser = TreeSitterParser()
         self.symbol_resolver = SymbolResolver()
+        self.llm_resolver = LLMEdgeResolver(api_key) if api_key else None
 
     def _make_id(self, file_path: str, function_name: str) -> str:
         return f"{file_path}::{function_name}"
@@ -90,7 +94,9 @@ class CallGraphBuilder:
                     s.function_name,
                     s.file_path or "",
                 ),
-                is_infrastructure=(s.function_name == "execute"),
+                is_infrastructure=any(
+                    s.function_name == p for p in INFRASTRUCTURE_PATTERNS
+                ),
                 is_external=False,
             )
 
@@ -102,6 +108,11 @@ class CallGraphBuilder:
         for s in samples:
 
             if not s.function_name or not s.ast_node:
+                if s.function_name:
+                    logger.debug(
+                        "Skipping edge extraction for %s — no AST node",
+                        s.function_name,
+                    )
                 continue
 
             src_id = self._make_id(s.file_path or "", s.function_name)
@@ -121,14 +132,13 @@ class CallGraphBuilder:
 
             for c in calls:
 
-                target = self.symbol_resolver.resolve(c)
-
                 # ─────────────────────────────────────
-                # FIX: member expression resolution
+                # Static resolution
                 # authService.registerUser -> registerUser
                 # fakeDb.execute -> execute
                 # ─────────────────────────────────────
-                simple_target = target.split(".")[-1]
+                simple_target = c.split(".")[-1] if "." in c else c
+                target = c
 
                 resolved_name = None
 
@@ -139,7 +149,30 @@ class CallGraphBuilder:
                     resolved_name = simple_target
 
                 # ─────────────────────────────────────
-                # external function
+                # HYBRID: AI fallback when static fails
+                # ─────────────────────────────────────
+                if resolved_name is None and self.llm_resolver and known:
+                    try:
+                        result = self.llm_resolver.resolve(
+                            caller=src_id,
+                            raw_call=c,
+                            caller_code=s.code,
+                            candidates=list(known),
+                        )
+                        ai_target = result.get("target")
+                        if ai_target and ai_target in known:
+                            resolved_name = ai_target
+                            logger.debug(
+                                "AI resolved %r -> %r (caller: %s)",
+                                c,
+                                ai_target,
+                                src_id,
+                            )
+                    except Exception as e:
+                        logger.debug("AI edge resolution failed for %r: %s", c, e)
+
+                # ─────────────────────────────────────
+                # External node — truly unresolved
                 # ─────────────────────────────────────
                 if resolved_name is None:
 
@@ -155,24 +188,20 @@ class CallGraphBuilder:
                         )
 
                     src_node.callees.add(ext_id)
-
                     graph[ext_id].callers.add(src_id)
-
                     continue
 
                 # ─────────────────────────────────────
-                # internal function
+                # Internal function — wire the edge
                 # ─────────────────────────────────────
                 targets = name_index.get(resolved_name, set())
 
                 for tgt_id in targets:
 
-                    # prevent self-edge
                     if tgt_id == src_id:
                         continue
 
                     src_node.callees.add(tgt_id)
-
                     graph[tgt_id].callers.add(src_id)
 
         # ─────────────────────────────────────────────
@@ -181,7 +210,6 @@ class CallGraphBuilder:
         for node in graph.values():
 
             node.callers = sorted(list(node.callers))
-
             node.callees = sorted(list(node.callees))
 
         name_index_final = {k: sorted(list(v)) for k, v in name_index.items()}

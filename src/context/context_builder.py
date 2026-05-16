@@ -20,7 +20,8 @@ class ContextBuilder:
         graph: Dict[str, CallGraphNode],
     ) -> FunctionContext:
 
-        node = graph.get(target.function_name)
+        node_id = f"{target.file_path}::{target.function_name}"
+        node = graph.get(node_id)
 
         if not node:
             return FunctionContext(target, [], [], {})

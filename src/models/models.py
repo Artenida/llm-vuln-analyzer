@@ -24,19 +24,3 @@ EXTENSION_MAP = {
     ".hpp": Language.CPP,
     ".cc": Language.CPP,
 }
-
-
-@dataclass
-class CodeSample:
-    code: str
-    language: Language
-    source: str
-
-    function_name: Optional[str] = None
-    file_path: Optional[str] = None
-
-    start_line: Optional[int] = None
-    end_line: Optional[int] = None
-
-    ast_node: Optional[Any] = None
-    raw_content: Optional[str] = None
