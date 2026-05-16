@@ -39,6 +39,13 @@ def save_run(
     folder.mkdir(parents=True, exist_ok=True)
     out_path = folder / f"{run_id}.json"
 
+    # build a lookup: (function_name, file_path) -> (start_line, end_line)
+    # used to clamp affected_lines to the actual function range
+    line_range: dict[tuple[str, str], tuple[int, int]] = {}
+    for s in samples:
+        if s.function_name and s.file_path and s.start_line and s.end_line:
+            line_range[(s.function_name, s.file_path)] = (s.start_line, s.end_line)
+
     # summary stats
     total = len(reports)
     found = sum(1 for r in reports if r.vulnerability_found)
@@ -65,20 +72,53 @@ def save_run(
         payload["meta"] = extra_meta
 
     for report in reports:
+
+        # clamp affected_lines to the actual line range of the function
+        # prevents hallucinated line numbers that reference caller/callee code
+        raw_lines = report.affected_lines or []
+        key = (report.function_name, report.file_path)
+        if key in line_range and raw_lines:
+            start, end = line_range[key]
+            # affected_lines in reports are 1-based relative to the file,
+            # but the LLM sometimes returns them relative to the function body.
+            # Strategy: accept lines that fall within the function's file range.
+            # If ALL reported lines are out of range, they are likely
+            # function-relative — offset them by (start_line - 1) and re-clamp.
+            in_range = [l for l in raw_lines if start <= l <= end]
+            if in_range:
+                clamped_lines = in_range
+            else:
+                # attempt function-relative correction
+                offset = start - 1
+                corrected = [l + offset for l in raw_lines]
+                clamped_lines = [l for l in corrected if start <= l <= end]
+                if not clamped_lines:
+                    # give up — keep original but log it
+                    clamped_lines = raw_lines
+                    logger.debug(
+                        "affected_lines %s for %s couldn't be clamped to [%d, %d]",
+                        raw_lines,
+                        report.function_name,
+                        start,
+                        end,
+                    )
+        else:
+            clamped_lines = raw_lines
+
         payload["findings"].append({
-            "function_name":      report.function_name,
-            "file_path":          report.file_path,
-            "language":           report.language,
+            "function_name":       report.function_name,
+            "file_path":           report.file_path,
+            "language":            report.language,
             "vulnerability_found": report.vulnerability_found,
-            "cwe_id":             report.cwe_id,
-            "affected_lines":     report.affected_lines,
-            "severity":           report.severity,
-            "explanation":        report.explanation,
-            "patch_suggestion":   report.patch_suggestion,
-            "confidence":         report.confidence,
-            "hallucination_flag": report.hallucination_flag,
-            "analysis_mode":      report.analysis_mode,
-            "error":              report.error,
+            "cwe_id":              report.cwe_id,
+            "affected_lines":      clamped_lines,
+            "severity":            report.severity,
+            "explanation":         report.explanation,
+            "patch_suggestion":    report.patch_suggestion,
+            "confidence":          report.confidence,
+            "hallucination_flag":  report.hallucination_flag,
+            "analysis_mode":       report.analysis_mode,
+            "error":               report.error,
         })
 
     with open(out_path, "w", encoding="utf-8") as f:
@@ -87,37 +127,32 @@ def save_run(
     logger.info("Run saved → %s", out_path)
     return out_path
 
+
 def save_extraction_results(
     samples: list[CodeSample],
     source_path: str,
     output_folder: str,
 ) -> Path:
-    """
-    Saves extracted functions before analysis phase.
-    """
-
+    """Saves extracted functions before analysis phase."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     out_dir = Path(output_folder)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     out_path = out_dir / f"extraction_{ts}.json"
 
     results = []
-
     for sample in samples:
         results.append({
-            "file_path": sample.file_path,
+            "file_path":     sample.file_path,
             "function_name": sample.function_name,
-            "start_line": sample.start_line,
-            "end_line": sample.end_line,
-            "language": sample.language.value,
-            "code": sample.code,
+            "start_line":    sample.start_line,
+            "end_line":      sample.end_line,
+            "language":      sample.language.value,
+            "code":          sample.code,
         })
 
     payload = {
         "metadata": {
-            "source_path": source_path,
+            "source_path":  source_path,
             "generated_at": datetime.now().isoformat(),
         },
         "summary": {
@@ -131,35 +166,31 @@ def save_extraction_results(
 
     return out_path
 
+
 def save_call_graph(
     graph: dict,
     output_folder: str,
     source_path: str,
 ) -> Path:
-    """
-    Saves call graph output as JSON.
-    """
-
+    """Saves call graph output as JSON."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     out_dir = Path(output_folder)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     out_path = out_dir / f"call_graph_{ts}.json"
 
     payload = {
         "source_path": source_path,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp":   datetime.now().isoformat(),
         "total_nodes": len(graph),
-        "graph": {},
+        "graph":       {},
     }
 
     for name, node in graph.items():
         payload["graph"][name] = {
             "function_name": node.function_name,
-            "file_path": node.file_path,
-            "callers": node.callers,
-            "callees": node.callees,
+            "file_path":     node.file_path,
+            "callers":       node.callers,
+            "callees":       node.callees,
             "is_entry_point": node.is_entry_point,
         }
 
