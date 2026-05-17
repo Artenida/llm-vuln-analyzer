@@ -15,7 +15,7 @@ import yaml
 class LLMConfig:
     provider: str = "openai"
     model: str = "gpt-4o-mini"
-    max_tokens: int = 3000
+    max_tokens: int = 3000        # bumped from 2000 — longer prompts need more room
     temperature: float = 0.0
 
 
@@ -31,32 +31,32 @@ class IngestionConfig:
 @dataclass
 class OutputConfig:
     results_folder: str = "experiments/results"
-
     extraction_folder: str = "experiments/results/extraction"
-
     context_folder: str = "experiments/results/context"
-
     analysis_folder: str = "experiments/results/analysis"
-
     evaluation_folder: str = "experiments/results/evaluation"
-
     save_per_run: bool = True
+
+
+@dataclass
+class AgentConfig:
+    react_mode: bool = False     # use ReAct loop instead of single-pass
+    max_steps: int = 5           # max tool calls per function in ReAct mode
+
 
 @dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
 
     @property
-    def openai_api_key(self) -> str | None:
+    def openai_api_key(self) -> Optional[str]:
         return os.environ.get("OPENAI_API_KEY")
 
+
 def load_config(path: Optional[str] = None) -> AppConfig:
-    """
-    Loads config from a YAML file.
-    Falls back to default values if the file does not exist.
-    """
     if path is None:
         path = os.path.join(
             Path(__file__).parent.parent,
@@ -73,12 +73,13 @@ def load_config(path: Optional[str] = None) -> AppConfig:
     llm_raw = raw.get("llm", {})
     ing_raw = raw.get("ingestion", {})
     out_raw = raw.get("output", {})
+    agt_raw = raw.get("agent", {})
 
     return AppConfig(
         llm=LLMConfig(
             provider=llm_raw.get("provider", "openai"),
             model=llm_raw.get("model", "gpt-4o-mini"),
-            max_tokens=llm_raw.get("max_tokens", 2000),
+            max_tokens=llm_raw.get("max_tokens", 3000),
             temperature=llm_raw.get("temperature", 0.0),
         ),
         ingestion=IngestionConfig(
@@ -88,34 +89,15 @@ def load_config(path: Optional[str] = None) -> AppConfig:
             ]),
         ),
         output=OutputConfig(
-            results_folder=out_raw.get(
-                "results_folder",
-                "experiments/results",
-            ),
-
-            extraction_folder=out_raw.get(
-                "extraction_folder",
-                "experiments/results/extraction",
-            ),
-
-            context_folder=out_raw.get(
-                "context_folder",
-                "experiments/results/context",
-            ),
-
-            analysis_folder=out_raw.get(
-                "analysis_folder",
-                "experiments/results/analysis",
-            ),
-
-            evaluation_folder=out_raw.get(
-                "evaluation_folder",
-                "experiments/results/evaluation",
-            ),
-
-            save_per_run=out_raw.get(
-                "save_per_run",
-                True,
-            ),
+            results_folder=out_raw.get("results_folder", "experiments/results"),
+            extraction_folder=out_raw.get("extraction_folder", "experiments/results/extraction"),
+            context_folder=out_raw.get("context_folder", "experiments/results/context"),
+            analysis_folder=out_raw.get("analysis_folder", "experiments/results/analysis"),
+            evaluation_folder=out_raw.get("evaluation_folder", "experiments/results/evaluation"),
+            save_per_run=out_raw.get("save_per_run", True),
+        ),
+        agent=AgentConfig(
+            react_mode=agt_raw.get("react_mode", False),
+            max_steps=agt_raw.get("max_steps", 5),
         ),
     )

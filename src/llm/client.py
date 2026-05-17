@@ -1,15 +1,16 @@
 """
 LLM client.
-Sends a prompt to the configured LLM and parses the JSON response
-into a VulnerabilityReport.
+Two modes:
+  analyze()  — single-pass vulnerability report (used without --react)
+  reason()   — one ReAct step: returns either a tool call or a final report
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import openai
 
@@ -19,133 +20,212 @@ from src.models import CodeSample
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Output types
+# ─────────────────────────────────────────────────────────────────────────────
+
 @dataclass
 class VulnerabilityReport:
     function_name: Optional[str]
     file_path: Optional[str]
     language: str
-
     vulnerability_found: bool
     cwe_id: Optional[str]
     affected_lines: list[int]
-    severity: Optional[str]           # low / medium / high / critical
+    severity: Optional[str]
     explanation: str
     patch_suggestion: str
     confidence: float
     hallucination_flag: bool
-
-    # set by pipeline, not LLM
     analysis_mode: str = "single_function"
     error: Optional[str] = None
+
+
+@dataclass
+class ReActStep:
+    """One step returned by reason(). Either a tool call or a final answer."""
+    is_final: bool
+    # if is_final=True
+    report: Optional[VulnerabilityReport] = None
+    # if is_final=False
+    tool_name: Optional[str] = None      # e.g. "get_callees"
+    tool_args: Optional[dict] = None     # e.g. {"function_name": "findById"}
+    reasoning: Optional[str] = None      # agent's scratchpad thought
 
 
 _SAFE_REPORT = VulnerabilityReport(
     function_name=None, file_path=None, language="unknown",
     vulnerability_found=False, cwe_id=None, affected_lines=[],
-    severity=None, explanation="Parse error — could not read LLM response.",
+    severity=None,
+    explanation="Parse error — could not read LLM response.",
     patch_suggestion="", confidence=0.0, hallucination_flag=True,
     error="json_parse_error",
 )
 
-SYSTEM_PROMPT = (
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompts
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ANALYSIS_SYSTEM = (
     "You are a security-focused code reviewer. "
     "Respond ONLY with a valid JSON object. "
     "Do not include markdown, prose, or text outside the JSON."
 )
 
-USER_PROMPT_TEMPLATE = """\
-Analyse the following {language} code for security vulnerabilities.
+_REACT_SYSTEM = """\
+You are a security analysis agent operating in a ReAct loop.
+Each turn you receive the current state and must respond with exactly ONE of:
 
-{context_sections}
+Option A — call a tool to gather more information:
+{
+  "action": "tool",
+  "tool": "<tool_name>",
+  "args": { <tool arguments> },
+  "thought": "<one sentence reasoning>"
+}
 
-Respond with this exact JSON schema:
-{{
+Option B — emit the final vulnerability report when you have enough information:
+{
+  "action": "final",
+  "thought": "<one sentence final reasoning>",
   "vulnerability_found": boolean,
   "cwe_id": string or null,
-  "affected_lines": [list of integers],
+  "affected_lines": [list of integers — file-relative line numbers in TARGET only],
   "severity": "low" | "medium" | "high" | "critical" | null,
   "explanation": string,
   "patch_suggestion": string,
-  "confidence": float between 0.0 and 1.0,
+  "confidence": float 0.0-1.0,
   "hallucination_flag": boolean
-}}
+}
+
+Available tools:
+  get_callees(function_name)   — returns list of functions this function calls
+  get_callers(function_name)   — returns list of functions that call this function
+  get_source(function_name)    — returns source code of a specific function
+  is_entry_point(function_name) — returns true if this is an HTTP handler / route
+
+Rules:
+- Start by reading the target function code provided in the state.
+- Use tools ONLY when you need information not already in the state.
+- Do NOT flag a vulnerability because a CALLEE has it — use get_callees + get_source
+  to inspect the callee and attribute findings to the correct function.
+- Do NOT flag a controller that only delegates — verify with get_callers if needed.
+- A config.X reference is NOT a hardcoded secret — it reads from configuration.
+- Emit "final" as soon as you have enough evidence. Max steps is enforced externally.
+- Respond ONLY with valid JSON matching Option A or Option B. No markdown.
+"""
+
+_REACT_STATE_TEMPLATE = """\
+=== TARGET FUNCTION ===
+Name: {function_name}
+File: {file_path}
+Lines: {start_line}–{end_line}
+
+```{language}
+{code}
+```
+
+=== TOOL HISTORY ===
+{tool_history}
+
+=== TASK ===
+Determine if the TARGET FUNCTION contains a security vulnerability.
+Remember: only flag what is directly in the target — not in its callers or callees.
 """
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Client
+# ─────────────────────────────────────────────────────────────────────────────
+
 class LLMClient:
+
     def __init__(self, config: LLMConfig):
         self.config = config
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise EnvironmentError(
-                "OPENAI_API_KEY environment variable is not set."
-            )
+            raise EnvironmentError("OPENAI_API_KEY environment variable is not set.")
         self.client = openai.OpenAI(api_key=api_key)
 
-    def analyze(self, sample: CodeSample,
-                context_prompt: Optional[str] = None) -> VulnerabilityReport:
-        """
-        Analyzes a CodeSample.
-        If context_prompt is provided (Phase 2+), it is used as the full
-        user message. Otherwise a minimal single-function prompt is built.
-        """
-        if context_prompt is not None:
-            user_message = context_prompt
-        else:
-            user_message = self._build_single_prompt(sample)
+    # ── single-pass analysis ──────────────────────────────────────────────────
 
+    def analyze(
+        self,
+        sample: CodeSample,
+        context_prompt: Optional[str] = None,
+    ) -> VulnerabilityReport:
+        user_message = context_prompt or self._build_single_prompt(sample)
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
                 temperature=self.config.temperature,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": _ANALYSIS_SYSTEM},
                     {"role": "user",   "content": user_message},
                 ],
             )
             raw = response.choices[0].message.content or ""
-            return self._parse_response(raw, sample)
-
+            return self._parse_report(raw, sample)
         except openai.OpenAIError as e:
             logger.error("OpenAI API error: %s", e)
-            report = _SAFE_REPORT
-            report.function_name = sample.function_name
-            report.file_path = sample.file_path
-            report.language = sample.language.value
-            report.error = f"api_error: {e}"
-            return report
+            r = _make_safe(sample)
+            r.error = f"api_error: {e}"
+            return r
 
-    # ── prompt builders ───────────────────────────────────────────────────────
+    # ── ReAct step ────────────────────────────────────────────────────────────
 
-    def _build_single_prompt(self, sample: CodeSample) -> str:
-        code_section = f"## Function to analyse\n```\n{sample.code}\n```"
-        return USER_PROMPT_TEMPLATE.format(
+    def reason(
+        self,
+        sample: CodeSample,
+        tool_history: list[dict],
+        start_line: int = 0,
+        end_line: int = 0,
+    ) -> ReActStep:
+        """
+        One ReAct reasoning step. Returns either a tool call or a final report.
+        tool_history is a list of {"tool": ..., "args": ..., "result": ...} dicts.
+        """
+        history_text = _format_tool_history(tool_history)
+
+        state_message = _REACT_STATE_TEMPLATE.format(
+            function_name=sample.function_name,
+            file_path=sample.file_path,
+            start_line=start_line or sample.start_line or "?",
+            end_line=end_line or sample.end_line or "?",
             language=sample.language.value,
-            context_sections=code_section,
+            code=sample.code,
+            tool_history=history_text or "(none yet)",
         )
 
-    # ── response parser ───────────────────────────────────────────────────────
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.model,
+                max_tokens=self.config.max_tokens,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": _REACT_SYSTEM},
+                    {"role": "user",   "content": state_message},
+                ],
+            )
+            raw = response.choices[0].message.content or ""
+            return self._parse_react_step(raw, sample)
+        except openai.OpenAIError as e:
+            logger.error("OpenAI API error in reason(): %s", e)
+            return ReActStep(
+                is_final=True,
+                report=_make_error(sample, f"api_error: {e}"),
+            )
 
-    def _parse_response(self, raw: str, sample: CodeSample) -> VulnerabilityReport:
-        # strip markdown code fences if present
-        text = raw.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            text = "\n".join(
-                line for line in lines
-                if not line.startswith("```")
-            ).strip()
+    # ── parsers ───────────────────────────────────────────────────────────────
 
+    def _parse_report(self, raw: str, sample: CodeSample) -> VulnerabilityReport:
+        text = _strip_fences(raw)
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
             logger.warning("JSON parse error: %s | raw: %.200s", e, raw)
-            report = _SAFE_REPORT
-            report.function_name = sample.function_name
-            report.file_path = sample.file_path
-            report.language = sample.language.value
-            return report
+            return _make_safe(sample)
 
         return VulnerabilityReport(
             function_name=sample.function_name,
@@ -160,3 +240,104 @@ class LLMClient:
             confidence=float(data.get("confidence", 0.0)),
             hallucination_flag=bool(data.get("hallucination_flag", False)),
         )
+
+    def _parse_react_step(self, raw: str, sample: CodeSample) -> ReActStep:
+        text = _strip_fences(raw)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.warning("ReAct JSON parse error: %s | raw: %.200s", e, raw)
+            return ReActStep(is_final=True, report=_make_safe(sample))
+
+        action = data.get("action", "final")
+
+        if action == "tool":
+            return ReActStep(
+                is_final=False,
+                tool_name=data.get("tool"),
+                tool_args=data.get("args", {}),
+                reasoning=data.get("thought"),
+            )
+
+        # action == "final"
+        report = VulnerabilityReport(
+            function_name=sample.function_name,
+            file_path=sample.file_path,
+            language=sample.language.value,
+            vulnerability_found=bool(data.get("vulnerability_found", False)),
+            cwe_id=data.get("cwe_id"),
+            affected_lines=data.get("affected_lines", []),
+            severity=data.get("severity"),
+            explanation=data.get("explanation", ""),
+            patch_suggestion=data.get("patch_suggestion", ""),
+            confidence=float(data.get("confidence", 0.0)),
+            hallucination_flag=bool(data.get("hallucination_flag", False)),
+            analysis_mode="react_loop",
+        )
+        return ReActStep(
+            is_final=True,
+            report=report,
+            reasoning=data.get("thought"),
+        )
+
+    def _build_single_prompt(self, sample: CodeSample) -> str:
+        code_section = f"## Function to analyse\n```\n{sample.code}\n```"
+        return (
+            f"Analyse the following {sample.language.value} code for security vulnerabilities.\n\n"
+            f"{code_section}\n\n"
+            "Respond with this exact JSON schema:\n"
+            "{\n"
+            '  "vulnerability_found": boolean,\n'
+            '  "cwe_id": string or null,\n'
+            '  "affected_lines": [list of integers],\n'
+            '  "severity": "low" | "medium" | "high" | "critical" | null,\n'
+            '  "explanation": string,\n'
+            '  "patch_suggestion": string,\n'
+            '  "confidence": float between 0.0 and 1.0,\n'
+            '  "hallucination_flag": boolean\n'
+            "}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _strip_fences(raw: str) -> str:
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(l for l in lines if not l.startswith("```")).strip()
+    return text
+
+
+def _make_safe(sample: CodeSample) -> VulnerabilityReport:
+    r = VulnerabilityReport(
+        function_name=sample.function_name,
+        file_path=sample.file_path,
+        language=sample.language.value,
+        vulnerability_found=False, cwe_id=None, affected_lines=[],
+        severity=None,
+        explanation="Parse error — could not read LLM response.",
+        patch_suggestion="", confidence=0.0, hallucination_flag=True,
+        error="json_parse_error",
+    )
+    return r
+
+
+def _make_error(sample: CodeSample, msg: str) -> VulnerabilityReport:
+    r = _make_safe(sample)
+    r.error = msg
+    return r
+
+
+def _format_tool_history(history: list[dict]) -> str:
+    if not history:
+        return ""
+    lines = []
+    for i, entry in enumerate(history, 1):
+        tool = entry.get("tool", "?")
+        args = json.dumps(entry.get("args", {}))
+        result = entry.get("result", "")
+        lines.append(f"Step {i}: {tool}({args})\nResult: {result}\n")
+    return "\n".join(lines)
