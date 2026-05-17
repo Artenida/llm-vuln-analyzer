@@ -165,7 +165,12 @@ class ReActAgent:
         lines.append("VULNERABILITY CHECKLIST")
         lines.append("=" * 60)
         lines.append(
-            "Check ALL of the following categories against the TARGET FUNCTION. "
+            "For each category below, assume NOT VULNERABLE unless you find direct"
+            "evidence in the TARGET FUNCTION's code. A function that calls another"
+            "function is NOT itself vulnerable for what that callee does. A function"
+            "that receives a parameter and passes it along is NOT missing input"
+            "validation — validation belongs at the boundary where the data enters"
+            "the system. "
             "This list is not exhaustive — also report any other vulnerability "
             "you identify that is not listed here.\n"
         )

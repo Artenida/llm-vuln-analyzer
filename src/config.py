@@ -15,7 +15,7 @@ import yaml
 class LLMConfig:
     provider: str = "openai"
     model: str = "gpt-4o-mini"
-    max_tokens: int = 2000
+    max_tokens: int = 3000
     temperature: float = 0.0
 
 
