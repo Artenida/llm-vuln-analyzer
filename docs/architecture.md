@@ -1,6 +1,6 @@
 # Architecture
 
-> **Current state: Sprint 2 complete.** Sprint 3 (patch generation) and Sprint 4 (metrics) are next.
+> **Current state: Sprint 2 complete.** Sprint 3 (patch generation) is next, followed by Sprint 4 (Scale & Multi-Language).
 
 ---
 
@@ -174,11 +174,13 @@ class VulnerabilityReport:
     affected_lines: list[int]  # clamped to function line range
     severity: str | None       # low | medium | high | critical
     explanation: str
-    patch_suggestion: str      # free-text suggestion (Sprint 3: becomes unified diff)
+    patch_suggestion: str      # free-text suggestion
     confidence: float          # 0.0 – 1.0
     hallucination_flag: bool
     analysis_mode: str         # call_graph_context | react_loop
     error: str | None
+    # Sprint 3 adds: unified_diff: str, patch_valid: bool, patch_error: str | None
+    # — a proposed fix only; never written to the analyzed project unless the user opts in
 ```
 
 ---
@@ -270,8 +272,7 @@ experiments/
 │       ├── src/
 │       └── ground_truth.json
 │
-├── ground_truth/             ← shared evaluation datasets (Sprint 4)
-├── patches/                  ← generated patch files (Sprint 3)
+├── patches/                  ← generated patch proposals (Sprint 3) — diffs only, never applied to source unless `--apply` is passed
 ├── scripts/                  ← PowerShell experiment runners
 │   ├── run_semantic.ps1
 │   ├── run_agentic.ps1
@@ -305,8 +306,7 @@ Named runs make thesis experiments reproducible and comparable. `experiments/run
 | Item | Status |
 |------|--------|
 | `patch_suggestion` is free text — no structured diff or verification | Sprint 3 |
-| No evaluation framework — no ground-truth dataset, no precision/recall metrics | Sprint 4 |
-| `agent/memory.py` is a partial stub — cross-function memory is recorded but not deeply reused | Sprint 4 |
+| No evaluation framework — no ground-truth dataset, no precision/recall metrics | Backlog (unscheduled) |
 | Taint propagation is flag-based only — does not track individual variable flows | Backlog |
-| No multi-provider support — only OpenAI implemented | Sprint 4 |
-| Functions > `max_function_lines` (200) are silently skipped | Sprint 3 |
+| No multi-provider support — only OpenAI implemented | Backlog (unscheduled) |
+| Functions > `max_function_lines` (200) are silently skipped | Sprint 4 |
