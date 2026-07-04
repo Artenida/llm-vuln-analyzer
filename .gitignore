@@ -21,6 +21,7 @@ experiments/datasets/
 # Editors
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store

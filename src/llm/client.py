@@ -113,6 +113,11 @@ Rules:
 - A config.X reference is NOT a hardcoded secret — it reads from configuration.
 - Emit "final" as soon as you have enough evidence. Max steps is enforced externally.
 - Respond ONLY with valid JSON matching Option A or Option B. No markdown.
+
+ - A function that RECEIVES an already-constructed SQL/command string and
+    executes it (e.g. a db.execute(query) wrapper) is NOT vulnerable for
+    injection — the vulnerability is in the CALLER that builds the string.
+    Use get_callers + get_source to find and flag the builder, not the executor.
 """
 
 _REACT_STATE_TEMPLATE = """\
@@ -158,8 +163,8 @@ class LLMClient:
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
-                max_tokens=self.config.max_tokens,
-                temperature=self.config.temperature,
+                #max_tokens=self.config.max_tokens,
+                #temperature=self.config.temperature,
                 messages=[
                     {"role": "system", "content": _ANALYSIS_SYSTEM},
                     {"role": "user",   "content": user_message},
@@ -201,8 +206,8 @@ class LLMClient:
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
-                max_tokens=self.config.max_tokens,
-                temperature=0.0,
+                #max_tokens=self.config.max_tokens,
+                #temperature=0.0,
                 messages=[
                     {"role": "system", "content": _REACT_SYSTEM},
                     {"role": "user",   "content": state_message},
@@ -232,7 +237,7 @@ class LLMClient:
             file_path=sample.file_path,
             language=sample.language.value,
             vulnerability_found=bool(data.get("vulnerability_found", False)),
-            cwe_id=data.get("cwe_id"),
+            cwe_id=_normalize_cwe(data.get("cwe_id")),
             affected_lines=data.get("affected_lines", []),
             severity=data.get("severity"),
             explanation=data.get("explanation", ""),
@@ -265,7 +270,7 @@ class LLMClient:
             file_path=sample.file_path,
             language=sample.language.value,
             vulnerability_found=bool(data.get("vulnerability_found", False)),
-            cwe_id=data.get("cwe_id"),
+            cwe_id=_normalize_cwe(data.get("cwe_id")),
             affected_lines=data.get("affected_lines", []),
             severity=data.get("severity"),
             explanation=data.get("explanation", ""),
@@ -341,3 +346,16 @@ def _format_tool_history(history: list[dict]) -> str:
         result = entry.get("result", "")
         lines.append(f"Step {i}: {tool}({args})\nResult: {result}\n")
     return "\n".join(lines)
+
+def _normalize_cwe(raw: str | None) -> str | None:
+    """Normalize CWE to consistent 'CWE-NNN' format."""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    # already correct
+    if s.upper().startswith("CWE-"):
+        return "CWE-" + s[4:]
+    # bare number: "89" -> "CWE-89"
+    if s.isdigit():
+        return f"CWE-{s}"
+    return s

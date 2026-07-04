@@ -57,7 +57,7 @@ Which candidate is being called by "{raw_call}"?
 
 class OpenAIResolver:
 
-    def __init__(self, api_key: str, model: str = "gpt-4.1-mini"):
+    def __init__(self, api_key: str, model: str = "o4-mini"):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
@@ -89,7 +89,7 @@ class OpenAIResolver:
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                temperature=0,
+                #temperature=0,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_message},

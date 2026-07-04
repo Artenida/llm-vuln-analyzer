@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -46,7 +45,6 @@ def save_run(
         if s.function_name and s.file_path and s.start_line and s.end_line:
             line_range[(s.function_name, s.file_path)] = (s.start_line, s.end_line)
 
-    # summary stats
     total = len(reports)
     found = sum(1 for r in reports if r.vulnerability_found)
     errors = sum(1 for r in reports if r.error is not None)
@@ -72,18 +70,11 @@ def save_run(
         payload["meta"] = extra_meta
 
     for report in reports:
-
         # clamp affected_lines to the actual line range of the function
-        # prevents hallucinated line numbers that reference caller/callee code
         raw_lines = report.affected_lines or []
         key = (report.function_name, report.file_path)
         if key in line_range and raw_lines:
             start, end = line_range[key]
-            # affected_lines in reports are 1-based relative to the file,
-            # but the LLM sometimes returns them relative to the function body.
-            # Strategy: accept lines that fall within the function's file range.
-            # If ALL reported lines are out of range, they are likely
-            # function-relative — offset them by (start_line - 1) and re-clamp.
             in_range = [l for l in raw_lines if start <= l <= end]
             if in_range:
                 clamped_lines = in_range
@@ -93,7 +84,6 @@ def save_run(
                 corrected = [l + offset for l in raw_lines]
                 clamped_lines = [l for l in corrected if start <= l <= end]
                 if not clamped_lines:
-                    # give up — keep original but log it
                     clamped_lines = raw_lines
                     logger.debug(
                         "affected_lines %s for %s couldn't be clamped to [%d, %d]",
@@ -187,11 +177,13 @@ def save_call_graph(
 
     for name, node in graph.items():
         payload["graph"][name] = {
-            "function_name": node.function_name,
-            "file_path":     node.file_path,
-            "callers":       node.callers,
-            "callees":       node.callees,
-            "is_entry_point": node.is_entry_point,
+            "function_name":    node.function_name,
+            "file_path":        node.file_path,
+            "callers":          node.callers,
+            "callees":          node.callees,
+            "is_entry_point":   node.is_entry_point,
+            "is_infrastructure": node.is_infrastructure,
+            "is_external":      node.is_external,
         }
 
     with open(out_path, "w", encoding="utf-8") as f:

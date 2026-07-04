@@ -14,9 +14,9 @@ import yaml
 @dataclass
 class LLMConfig:
     provider: str = "openai"
-    model: str = "gpt-4o-mini"
-    max_tokens: int = 3000        # bumped from 2000 — longer prompts need more room
-    temperature: float = 0.0
+    model: str = "o4-mini"
+    #max_tokens: int = 3000        # bumped from 2000 — longer prompts need more room
+    #temperature: float = 0.0
 
 
 @dataclass
@@ -78,9 +78,9 @@ def load_config(path: Optional[str] = None) -> AppConfig:
     return AppConfig(
         llm=LLMConfig(
             provider=llm_raw.get("provider", "openai"),
-            model=llm_raw.get("model", "gpt-4o-mini"),
-            max_tokens=llm_raw.get("max_tokens", 3000),
-            temperature=llm_raw.get("temperature", 0.0),
+            model=llm_raw.get("model", "o4-mini"),
+            #max_tokens=llm_raw.get("max_tokens", 3000),
+            #temperature=llm_raw.get("temperature", 0.0),
         ),
         ingestion=IngestionConfig(
             max_function_lines=ing_raw.get("max_function_lines", 200),

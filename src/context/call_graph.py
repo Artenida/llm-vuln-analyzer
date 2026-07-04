@@ -36,10 +36,10 @@ INFRASTRUCTURE_PATTERNS = ["execute", "query", "connect", "disconnect"]
 
 class CallGraphBuilder:
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, model: str = "o4-mini"):
         self.parser = TreeSitterParser()
         self.symbol_resolver = SymbolResolver()
-        self.llm_resolver = LLMEdgeResolver(api_key) if api_key else None
+        self.llm_resolver = LLMEdgeResolver(api_key, model=model) if api_key else None
 
     def _make_id(self, file_path: str, function_name: str) -> str:
         return f"{file_path}::{function_name}"
@@ -95,7 +95,7 @@ class CallGraphBuilder:
                     s.file_path or "",
                 ),
                 is_infrastructure=any(
-                    s.function_name == p for p in INFRASTRUCTURE_PATTERNS
+                    p in s.function_name.lower() for p in INFRASTRUCTURE_PATTERNS
                 ),
                 is_external=False,
             )

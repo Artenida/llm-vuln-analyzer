@@ -3,7 +3,7 @@ from collections import deque
 
 class GraphTraversal:
     def get_downstream(self, graph, node_id, depth=3):
-        visited = set()
+        visited = {node_id}
         queue = deque([(node_id, 0)])
 
         results = []

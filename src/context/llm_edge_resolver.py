@@ -29,8 +29,8 @@ _DEFAULT_CACHE_PATH = os.path.join(
 
 class LLMEdgeResolver:
 
-    def __init__(self, api_key: str, cache_path: str = None):
-        self.client = OpenAIResolver(api_key)
+    def __init__(self, api_key: str, model: str = "o4-mini", cache_path: str = None):
+        self.client = OpenAIResolver(api_key, model=model)
         self.cache = EdgeCache(
             cache_path or _DEFAULT_CACHE_PATH
         )

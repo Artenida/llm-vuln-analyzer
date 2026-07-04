@@ -6,11 +6,13 @@ calls tools to inspect callers/callees when it needs more context.
 This prevents callee vulnerability bleed: the agent explicitly
 decides whether a finding belongs to the target or a neighbour.
 """
+
 from __future__ import annotations
 
 import logging
 from typing import Dict, List, Optional
 
+from src.agent.memory import AgentMemory
 from src.agent.state import AgentState
 from src.agent.tools import ToolSet
 from src.llm.client import LLMClient, ReActStep, VulnerabilityReport
@@ -18,14 +20,16 @@ from src.models import CodeSample
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 5
+MAX_STEPS = 5  # default; overridden by AgentConfig.max_steps
 
 
 class ReActAgent:
 
-    def __init__(self, llm: LLMClient, tools: Optional[ToolSet]):
+    def __init__(self, llm: LLMClient, tools: Optional[ToolSet], max_steps: int = MAX_STEPS):
         self.llm = llm
         self.tools = tools
+        self.max_steps = max_steps
+        self.memory = AgentMemory()
 
     def run(
         self,
@@ -45,8 +49,25 @@ class ReActAgent:
 
         tool_history: List[dict] = []
 
-        for step in range(MAX_STEPS):
-            logger.debug("ReAct step %d/%d for %s", step + 1, MAX_STEPS, sample.function_name)
+        # Inject prior findings for callers/callees from this run's memory
+        if self.tools:
+            node_id = f"{sample.file_path}::{sample.function_name}"
+            neighbour_ids = (
+                self.tools.get_callers(sample.function_name, sample.file_path)
+                + self.tools.get_callees(sample.function_name, sample.file_path)
+            )
+            prior_context = self.memory.get_context_for(neighbour_ids)
+            if prior_context:
+                tool_history.append({
+                    "tool": "memory",
+                    "args": {},
+                    "result": prior_context,
+                })
+
+        for step in range(self.max_steps):
+            logger.debug(
+                "ReAct step %d/%d for %s", step + 1, self.max_steps, sample.function_name
+            )
 
             react_step: ReActStep = self.llm.reason(
                 sample=sample,
@@ -58,13 +79,19 @@ class ReActAgent:
             state.reasoning_trace.append(f"step_{step+1}: {react_step.reasoning}")
 
             if react_step.is_final:
-                logger.debug(
-                    "ReAct final after %d step(s) for %s: vuln=%s",
-                    step + 1, sample.function_name,
-                    react_step.report.vulnerability_found if react_step.report else "?",
-                )
                 report = react_step.report
-                report.analysis_mode = "react_loop"
+                # ── treat empty output as uncertain, retry once ───────────────
+                if _is_empty_output(report):
+                    logger.warning(
+                        "Empty final answer for %s at step %d — retrying single-pass",
+                        sample.function_name,
+                        step + 1,
+                    )
+                    report = self.llm.analyze(sample)
+                    report.analysis_mode = "react_loop_fallback"
+                else:
+                    report.analysis_mode = "react_loop"
+                self._record(sample, report)
                 return report
 
             tool_name = react_step.tool_name
@@ -73,23 +100,64 @@ class ReActAgent:
 
             result = self._execute_tool(tool_name, tool_args, code_map)
 
-            tool_history.append({"tool": tool_name, "args": tool_args, "result": result})
-            state.tool_history.append({"step": step + 1, "tool": tool_name, "args": tool_args, "result": result})
+            tool_history.append(
+                {"tool": tool_name, "args": tool_args, "result": result}
+            )
+            state.tool_history.append(
+                {
+                    "step": step + 1,
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "result": result,
+                }
+            )
 
-        logger.warning("ReAct max steps (%d) reached for %s", MAX_STEPS, sample.function_name)
-        tool_history.append({
-            "tool": "system", "args": {},
-            "result": f"Max steps ({MAX_STEPS}) reached. You MUST emit a final answer now.",
-        })
+        logger.warning(
+            "ReAct max steps (%d) reached for %s", self.max_steps, sample.function_name
+        )
+        tool_history.append(
+            {
+                "tool": "system",
+                "args": {},
+                "result": f"Max steps ({self.max_steps}) reached. You MUST emit a final answer now.",
+            }
+        )
         react_step = self.llm.reason(
-            sample=sample, tool_history=tool_history,
-            start_line=sample.start_line or 0, end_line=sample.end_line or 0,
+            sample=sample,
+            tool_history=tool_history,
+            start_line=sample.start_line or 0,
+            end_line=sample.end_line or 0,
         )
         report = react_step.report or _make_timeout_report(sample)
-        report.analysis_mode = "react_loop"
+
+        # ── retry if output is empty ──────────────────────────────────────────
+        if _is_empty_output(report):
+            logger.warning(
+                "Empty ReAct output for %s — falling back to single-pass",
+                sample.function_name,
+            )
+            report = self.llm.analyze(sample)
+            report.analysis_mode = "react_loop_fallback"
+        else:
+            report.analysis_mode = "react_loop"
+
+        self._record(sample, report)
         return report
 
-    def _execute_tool(self, tool_name: Optional[str], args: dict, code_map: Dict[str, str]) -> str:
+    def _record(self, sample: CodeSample, report: VulnerabilityReport) -> None:
+        node_id = f"{sample.file_path}::{sample.function_name}"
+        self.memory.record(
+            node_id=node_id,
+            function_name=sample.function_name,
+            vulnerability_found=report.vulnerability_found,
+            cwe_id=report.cwe_id,
+            severity=report.severity,
+            summary=report.explanation[:120] if report.explanation else "",
+        )
+
+    def _execute_tool(
+        self, tool_name: Optional[str], args: dict, code_map: Dict[str, str]
+    ) -> str:
         if not self.tools or not tool_name:
             return "Tool unavailable — no call graph loaded."
 
@@ -101,7 +169,11 @@ class ReActAgent:
                 if not result:
                     return f"No callees found for '{fn}'."
                 internal = [r for r in result if not r.startswith("external::")]
-                external = [r.replace("external::", "") for r in result if r.startswith("external::")]
+                external = [
+                    r.replace("external::", "")
+                    for r in result
+                    if r.startswith("external::")
+                ]
                 parts = []
                 if internal:
                     parts.append("Internal callees: " + ", ".join(internal))
@@ -154,8 +226,28 @@ def _make_timeout_report(sample: CodeSample) -> VulnerabilityReport:
         file_path=sample.file_path,
         language=sample.language.value,
         vulnerability_found=False,
-        cwe_id=None, affected_lines=[], severity=None,
+        cwe_id=None,
+        affected_lines=[],
+        severity=None,
         explanation="ReAct loop reached max steps without a final answer.",
-        patch_suggestion="", confidence=0.0, hallucination_flag=True,
-        analysis_mode="react_loop", error="max_steps_exceeded",
+        patch_suggestion="",
+        confidence=0.0,
+        hallucination_flag=True,
+        analysis_mode="react_loop",
+        error="max_steps_exceeded",
+    )
+
+
+def _is_empty_output(report: VulnerabilityReport) -> bool:
+    """
+    True if the report is a silent failure:
+    confidence=0, empty explanation, no vuln found.
+    These cannot be trusted as genuine clean verdicts.
+    """
+    return (
+        report is not None
+        and not report.vulnerability_found
+        and report.confidence == 0.0
+        and not report.explanation
+        and not report.error  # don't retry real errors
     )

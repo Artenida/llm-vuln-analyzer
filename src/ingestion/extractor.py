@@ -9,6 +9,8 @@ from typing import Union
 
 from src.models import EXTENSION_MAP, CodeSample, Language
 from src.ingestion.parser import TreeSitterParser
+from src.ingestion.import_extractor import ImportExtractor
+from src.ingestion.route_extractor import RouteExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,8 @@ class CodeExtractor:
 
     def __init__(self, max_function_lines: int = 200):
         self.parser = TreeSitterParser(max_function_lines=max_function_lines)
+        self._import_extractor = ImportExtractor()
+        self._route_extractor = RouteExtractor()
 
     # ── public entry points ───────────────────────────────────────────────────
 
@@ -109,6 +113,10 @@ class CodeExtractor:
         if not functions:
             logger.debug("No functions extracted from %s", file_path)
 
+        # File-level extractions — shared across all functions in this file
+        imports = self._import_extractor.extract(content)
+        routes = self._route_extractor.extract(content)
+
         samples = []
         for fn in functions:
             samples.append(CodeSample(
@@ -118,10 +126,10 @@ class CodeExtractor:
                 file_path=file_path,
                 start_line=fn.start_line,
                 end_line=fn.end_line,
-
-                # NEW
                 ast_node=fn.ast_node,
                 raw_content=content,
+                imports=imports,
+                routes=routes,
             ))
 
         return samples

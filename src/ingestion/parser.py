@@ -5,8 +5,6 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from src.ingestion.import_extractor import ImportExtractor
-from src.ingestion.route_extractor import RouteExtractor
 from src.models.code_sample import CallSite
 
 from tree_sitter import Language, Node, Parser, Tree
@@ -223,6 +221,10 @@ class TreeSitterParser:
     def __init__(self, max_function_lines: int = 200):
         self.max_function_lines = max_function_lines
 
+    @property
+    def supported_languages(self) -> list[str]:
+        return list(_get_grammars().keys())
+
     def parse(self,
               content: str,
               language: str) -> Optional[Tree]:
@@ -234,8 +236,6 @@ class TreeSitterParser:
         if grammar is None:
             return None
 
-        self.import_extractor = ImportExtractor()
-        self.route_extractor = RouteExtractor()
         try:
             parser = Parser(grammar)
 

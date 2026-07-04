@@ -1,8 +1,8 @@
 llm:
   provider: openai
-  model: gpt-4o-mini
-  max_tokens: 2000
-  temperature: 0          # deterministic output
+  model: o4-mini
+  #max_tokens: 2000
+  #temperature: 0          # deterministic output
 
 ingestion:
   max_function_lines: 200

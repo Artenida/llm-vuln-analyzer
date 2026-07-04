@@ -13,6 +13,13 @@ Key flags:
 from __future__ import annotations
 
 import json
+
+# Load .env automatically so users don't have to export env vars manually
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv optional — fall back to manually set env vars
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -120,7 +127,7 @@ def analyze(
 
     if build_context:
         typer.echo("\nBuilding call graph...")
-        builder = CallGraphBuilder(api_key=config.openai_api_key)
+        builder = CallGraphBuilder(api_key=config.openai_api_key, model=config.llm.model)
         graph, name_index = builder.build(samples)
 
         context_out = save_call_graph(
@@ -139,10 +146,10 @@ def analyze(
 
     # ── LLM + agent setup ─────────────────────────────────────────────────────
     client = LLMClient(config.llm)
-    agent = ReActAgent(llm=client, tools=tools)
+    agent = ReActAgent(llm=client, tools=tools, max_steps=config.agent.max_steps)
 
     if react:
-        mode_label = f"ReAct loop — reason→act→observe (max {MAX_STEPS} tool calls per function)"
+        mode_label = f"ReAct loop — reason→act→observe (max {config.agent.max_steps} tool calls per function)"
     elif build_context:
         mode_label = "single-pass with call graph context injected into prompt"
     else:
