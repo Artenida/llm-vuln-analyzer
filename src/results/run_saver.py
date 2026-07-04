@@ -70,7 +70,27 @@ def save_run(
     if extra_meta:
         payload["meta"] = extra_meta
 
+    # Build duplicate groups: same (function_name, cwe_id) flagged across different files.
+    # Assign a shared group ID so evaluation can deduplicate without suppressing findings.
+    dup_groups: dict[tuple, int] = {}
+    group_counter = 0
+    finding_groups: list[int | None] = []
     for report in reports:
+        if report.vulnerability_found and report.cwe_id and report.function_name:
+            dk = (report.function_name, report.cwe_id)
+            if dk not in dup_groups:
+                dup_groups[dk] = group_counter
+                group_counter += 1
+            finding_groups.append(dup_groups[dk])
+        else:
+            finding_groups.append(None)
+
+    # Count groups that have more than one member (actual duplicates)
+    from collections import Counter
+    group_counts = Counter(g for g in finding_groups if g is not None)
+    duplicate_groups = {g for g, c in group_counts.items() if c > 1}
+
+    for report, group_id in zip(reports, finding_groups):
         # clamp affected_lines to the actual line range of the function
         raw_lines = report.affected_lines or []
         key = (report.function_name, report.file_path)
@@ -96,6 +116,7 @@ def save_run(
         else:
             clamped_lines = raw_lines
 
+        is_dup = group_id is not None and group_id in duplicate_groups
         payload["findings"].append({
             "function_name":       report.function_name,
             "file_path":           report.file_path,
@@ -110,6 +131,7 @@ def save_run(
             "hallucination_flag":  report.hallucination_flag,
             "analysis_mode":       report.analysis_mode,
             "error":               report.error,
+            "duplicate_group":     group_id if is_dup else None,
         })
 
     with open(out_path, "w", encoding="utf-8") as f:

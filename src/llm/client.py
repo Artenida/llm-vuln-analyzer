@@ -94,7 +94,10 @@ Option B — emit the final vulnerability report when you have enough informatio
   "severity": "low" | "medium" | "high" | "critical" | null,
   "explanation": string,
   "patch_suggestion": string,
-  "confidence": float 0.0-1.0,
+  "confidence": float 0.0–1.0 — probability that a vulnerability EXISTS.
+               MUST be > 0.5 when vulnerability_found is true.
+               MUST be < 0.5 when vulnerability_found is false.
+               0.9+ means near-certain exploit; 0.1 means near-certain clean.,
   "hallucination_flag": boolean
 }
 
@@ -122,6 +125,24 @@ Rules:
     executes it (e.g. a db.execute(query) wrapper) is NOT vulnerable for
     injection — the vulnerability is in the CALLER that builds the string.
     Use get_callers + get_source to find and flag the builder, not the executor.
+
+CWE assignment rules — use the MOST SPECIFIC applicable CWE:
+  CWE-89   SQL/NoSQL built by string concat or template literal interpolation
+  CWE-347  JWT or token accepted without signature verification (jwt.decode vs jwt.verify)
+  CWE-798  Hardcoded credentials, secrets, API keys, or static bypass codes
+  CWE-20   Security decision based on a client-supplied header (e.g. X-Forwarded-For for IP)
+  CWE-306  Security step skipped (e.g. current-password not verified before change)
+  CWE-208  Non-constant-time comparison of secrets (timing attack)
+  CWE-269  Role or privilege accepted directly from user-controlled input
+  NOTE: CWE-290 is for relay/reflection spoofing attacks — do NOT use it for static bypass codes
+        or hardcoded admin secrets; use CWE-798 instead.
+
+Severity rules — apply consistently for the same CWE:
+  high     CWE-89, CWE-347, CWE-798
+  medium   CWE-20, CWE-208, CWE-269, CWE-306
+  low      Informational / defence-in-depth only
+  Deviate from these defaults ONLY when you can state a concrete amplifying or
+  mitigating factor (e.g. "no authentication required to reach this endpoint").
 """
 
 _REACT_STATE_TEMPLATE = """\

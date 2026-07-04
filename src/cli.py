@@ -323,6 +323,20 @@ def _build_context_prompt(
         ))
 
     lines.append(
+        "\nCWE assignment rules — use the MOST SPECIFIC applicable CWE:\n"
+        "  CWE-89   SQL/NoSQL built by string concat or template literal interpolation\n"
+        "  CWE-347  JWT or token accepted without signature verification\n"
+        "  CWE-798  Hardcoded credentials, secrets, API keys, or static bypass codes\n"
+        "  CWE-20   Security decision based on a client-supplied header (e.g. X-Forwarded-For)\n"
+        "  CWE-306  Security step skipped (e.g. current-password not verified before change)\n"
+        "  CWE-208  Non-constant-time comparison of secrets (timing attack)\n"
+        "  CWE-269  Role or privilege accepted directly from user-controlled input\n"
+        "  NOTE: CWE-290 is for relay/reflection attacks — NOT for static bypass codes; use CWE-798.\n"
+        "\nSeverity rules — consistent for the same CWE:\n"
+        "  high   → CWE-89, CWE-347, CWE-798\n"
+        "  medium → CWE-20, CWE-208, CWE-269, CWE-306\n"
+        "  low    → informational / defence-in-depth only\n"
+        "  Deviate only when you can state a concrete amplifying or mitigating factor.\n"
         "\nRespond with this EXACT JSON — no markdown, no extra text:\n"
         "{\n"
         '  "vulnerability_found": boolean,\n'
@@ -331,7 +345,9 @@ def _build_context_prompt(
         '  "severity": "low" | "medium" | "high" | "critical" | null,\n'
         '  "explanation": string — what is wrong in the TARGET and why it is exploitable,\n'
         '  "patch_suggestion": string — concrete fix for the TARGET function,\n'
-        '  "confidence": float 0.0-1.0,\n'
+        '  "confidence": float 0.0–1.0 — probability that a vulnerability EXISTS.\n'
+        '               MUST be > 0.5 when vulnerability_found is true.\n'
+        '               MUST be < 0.5 when vulnerability_found is false.,\n'
         '  "hallucination_flag": boolean\n'
         "}"
     )
