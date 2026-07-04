@@ -208,9 +208,23 @@ class ReActAgent:
                     return (
                         f"callers: {info['callers']}\n"
                         f"callees: {info['callees']}\n"
-                        f"is_entry_point: {info['is_entry_point']}"
+                        f"is_entry_point: {info['is_entry_point']}\n"
+                        f"is_taint_source: {info.get('is_taint_source', False)}\n"
+                        f"is_taint_sink: {info.get('is_taint_sink', False)}"
                     )
                 return f"No node info for '{fn}'."
+
+            elif tool_name == "get_taint_path":
+                paths = self.tools.get_taint_path(fn)
+                if not paths:
+                    return (
+                        f"No taint paths found involving '{fn}'. "
+                        "It may not be on a source→sink flow, or the graph has no entry points."
+                    )
+                lines = [f"Taint paths through '{fn}':"]
+                for i, p in enumerate(paths, 1):
+                    lines.append(f"  Path {i}: {p}")
+                return "\n".join(lines)
 
             else:
                 return f"Unknown tool '{tool_name}'."

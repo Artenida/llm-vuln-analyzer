@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from src.models import CodeSample
 from src.context.symbol_resolver import SymbolResolver
@@ -27,11 +27,26 @@ class CallGraphNode:
     is_entry_point: bool = False
     is_infrastructure: bool = False
     is_external: bool = False
+    is_taint_source: bool = False   # receives untrusted user input (e.g. HTTP handlers)
+    is_taint_sink: bool = False     # passes data to dangerous operations
 
 
 ENTRY_POINT_PATTERNS = ["handler", "route", "endpoint", "controller", "main"]
 
 INFRASTRUCTURE_PATTERNS = ["execute", "query", "connect", "disconnect"]
+
+# External calls that mark a node as a taint sink
+_SINK_EXTERNAL_PATTERNS = [
+    "execute", "query", "eval", "exec", "system", "popen",
+    "spawn", "shell", "run_command", "subprocess",
+    "write_file", "write", "send_response",
+]
+
+# Function-name patterns that are always sinks regardless of callees
+_SINK_NAME_PATTERNS = [
+    "execute", "exec_query", "run_query", "run_command",
+    "eval", "shell_exec",
+]
 
 
 class CallGraphBuilder:
@@ -67,7 +82,7 @@ class CallGraphBuilder:
 
     def build(
         self, samples: List[CodeSample]
-    ) -> Tuple[Dict[str, CallGraphNode], Dict[str, Set[str]]]:
+    ) -> Tuple[Dict[str, "CallGraphNode"], Dict[str, Set[str]]]:
 
         graph: Dict[str, CallGraphNode] = {}
         name_index: Dict[str, Set[str]] = {}
@@ -149,6 +164,21 @@ class CallGraphBuilder:
                     resolved_name = simple_target
 
                 # ─────────────────────────────────────
+                # Import-aware resolution via SymbolResolver
+                # Handles: authService.registerUser when imports exist
+                # ─────────────────────────────────────
+                if resolved_name is None and "." in c and s.imports:
+                    sr_candidates = self.symbol_resolver.resolve_candidates(
+                        s, c, samples
+                    )
+                    for tgt_id in sr_candidates:
+                        if tgt_id in graph:
+                            src_node.callees.add(tgt_id)
+                            graph[tgt_id].callers.add(src_id)
+                    if sr_candidates:
+                        continue  # wired directly; skip LLM fallback
+
+                # ─────────────────────────────────────
                 # HYBRID: AI fallback when static fails
                 # ─────────────────────────────────────
                 if resolved_name is None and self.llm_resolver and known:
@@ -205,7 +235,31 @@ class CallGraphBuilder:
                     graph[tgt_id].callers.add(src_id)
 
         # ─────────────────────────────────────────────
-        # 3. JSON SERIALIZATION FIX
+        # 3. TAINT PROPAGATION
+        # ─────────────────────────────────────────────
+        for node_id, node in graph.items():
+            if node.is_external:
+                continue
+
+            # entry points receive user-controlled data → taint sources
+            if node.is_entry_point:
+                node.is_taint_source = True
+
+            # function-name based sink detection
+            if any(p in node.function_name.lower() for p in _SINK_NAME_PATTERNS):
+                node.is_taint_sink = True
+
+            # sink detection via external callees: e.g. fakeDb.execute(...)
+            for callee_id in node.callees:
+                if callee_id.startswith("external::"):
+                    raw_name = callee_id.replace("external::", "")
+                    leaf = raw_name.split(".")[-1].lower()
+                    if any(p in leaf for p in _SINK_EXTERNAL_PATTERNS):
+                        node.is_taint_sink = True
+                        break
+
+        # ─────────────────────────────────────────────
+        # 4. JSON SERIALIZATION FIX
         # ─────────────────────────────────────────────
         for node in graph.values():
 
@@ -215,3 +269,24 @@ class CallGraphBuilder:
         name_index_final = {k: sorted(list(v)) for k, v in name_index.items()}
 
         return graph, name_index_final
+
+
+def nodes_to_dict(graph: Dict[str, "CallGraphNode"]) -> Dict[str, dict]:
+    """
+    Converts the Dict[str, CallGraphNode] returned by CallGraphBuilder.build()
+    into the plain Dict[str, dict] format consumed by export_dot / export_html.
+    """
+    result = {}
+    for node_id, node in graph.items():
+        result[node_id] = {
+            "function_name":     node.function_name,
+            "file_path":         node.file_path,
+            "callers":           list(node.callers),
+            "callees":           list(node.callees),
+            "is_entry_point":    node.is_entry_point,
+            "is_infrastructure": node.is_infrastructure,
+            "is_external":       node.is_external,
+            "is_taint_source":   node.is_taint_source,
+            "is_taint_sink":     node.is_taint_sink,
+        }
+    return result

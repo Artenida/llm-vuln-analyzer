@@ -6,9 +6,11 @@ Commands:
   show       Pretty-print a saved results JSON file
 
 Key flags:
-  --build-context   Build hybrid AI+static call graph before analysis
   --react           Use ReAct agent loop (reason->act->observe) instead of single-pass
   --dry-run         Extract + build graph only, no LLM calls
+
+Analysis always builds the call graph and injects context into the prompt.
+Use --react to switch from single-pass semantic to the agentic ReAct loop.
 """
 from __future__ import annotations
 
@@ -30,6 +32,9 @@ from src.config import load_config
 from src.context.call_graph import CallGraphBuilder
 from src.ingestion.extractor import CodeExtractor
 from src.results import save_extraction_results, save_run, save_call_graph
+from src.results.export_graph import export_dot, export_html
+from src.results.save_graph import load_call_graph
+from src.context.call_graph import nodes_to_dict
 from src.llm.client import LLMClient
 from src.agent.react_loop import ReActAgent, MAX_STEPS
 from src.agent.tools import ToolSet
@@ -66,12 +71,17 @@ def analyze(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Extract + build graph only, no LLM calls."
     ),
-    build_context: bool = typer.Option(
-        False, "--build-context", help="Build hybrid AI+static call graph before analysis."
-    ),
     react: bool = typer.Option(
         False, "--react",
-        help="Use ReAct agent loop (reason->act->observe). Requires --build-context."
+        help="Use ReAct agent loop (reason->act->observe) instead of single-pass semantic."
+    ),
+    visualize: bool = typer.Option(
+        False, "--visualize", "-v",
+        help="Export interactive HTML + DOT call graph after analysis."
+    ),
+    run_name: Optional[str] = typer.Option(
+        None, "--run-name", "-n",
+        help="Named experiment run. Outputs go to experiments/runs/<name>/ with fixed filenames."
     ),
 ):
     """Analyse source code for security vulnerabilities."""
@@ -80,12 +90,15 @@ def analyze(
         typer.echo("Error: provide --path or --snippet", err=True)
         raise typer.Exit(1)
 
-    # --react implies --build-context — the loop needs tools to call
-    if react and not build_context:
-        typer.echo("Note: --react requires --build-context — enabling automatically.")
-        build_context = True
-
     config = load_config(config_path)
+
+    # ── named run: redirect all outputs to experiments/runs/<name>/ ──────────
+    if run_name:
+        run_dir = f"experiments/runs/{run_name}"
+        config.output.extraction_folder = run_dir
+        config.output.context_folder    = run_dir
+        config.output.analysis_folder   = run_dir
+
     extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
 
     # ── extraction ────────────────────────────────────────────────────────────
@@ -117,6 +130,7 @@ def analyze(
         samples=samples,
         source_path=source_label,
         output_folder=config.output.extraction_folder,
+        filename="extraction.json" if run_name else None,
     )
     typer.echo(f"\nExtraction saved → {extraction_out}")
 
@@ -125,19 +139,32 @@ def analyze(
     name_index: dict = {}
     tools: Optional[ToolSet] = None
 
-    if build_context:
-        typer.echo("\nBuilding call graph...")
-        builder = CallGraphBuilder(api_key=config.openai_api_key, model=config.llm.model)
-        graph, name_index = builder.build(samples)
+    typer.echo("\nBuilding call graph...")
+    builder = CallGraphBuilder(api_key=config.openai_api_key, model=config.llm.model)
+    graph, name_index = builder.build(samples)
 
-        context_out = save_call_graph(
-            graph=graph,
-            output_folder=config.output.context_folder,
-            source_path=source_label,
+    context_out = save_call_graph(
+        graph=graph,
+        output_folder=config.output.context_folder,
+        source_path=source_label,
+        filename="call_graph.json" if run_name else None,
+    )
+    typer.echo(f"Call graph built successfully ({len(graph)} nodes)")
+    typer.echo(f"Call graph saved → {context_out}")
+    tools = ToolSet(graph, name_index)
+
+    if visualize:
+        plain = nodes_to_dict(graph)
+        dot_out = export_dot(
+            plain,
+            Path(config.output.context_folder) / "call_graph.dot",
         )
-        typer.echo(f"Call graph built successfully ({len(graph)} nodes)")
-        typer.echo(f"Call graph saved → {context_out}")
-        tools = ToolSet(graph, name_index)
+        html_out = export_html(
+            plain,
+            Path(config.output.context_folder) / "call_graph.html",
+        )
+        typer.echo(f"DOT  graph  → {dot_out}")
+        typer.echo(f"HTML graph  → {html_out} (open in browser)")
 
     # ── dry run ───────────────────────────────────────────────────────────────
     if dry_run:
@@ -150,10 +177,8 @@ def analyze(
 
     if react:
         mode_label = f"ReAct loop — reason→act→observe (max {config.agent.max_steps} tool calls per function)"
-    elif build_context:
-        mode_label = "single-pass with call graph context injected into prompt"
     else:
-        mode_label = "single-pass, no graph context"
+        mode_label = "single-pass with call graph context injected into prompt"
 
     typer.echo(f"\nAnalyzing {len(samples)} functions with {config.llm.model}")
     typer.echo(f"  Mode: {mode_label}\n")
@@ -166,22 +191,12 @@ def analyze(
 
         try:
             if react and tools is not None:
-                # ── ReAct loop ────────────────────────────────────────────────
-                # Agent starts with only the target function.
-                # It decides which tools to call (get_callers, get_callees,
-                # get_source, is_entry_point) before emitting a final answer.
                 report = agent.run(sample, graph, all_samples=samples)
-
-            elif build_context and tools is not None:
-                # ── single-pass with graph context ────────────────────────────
+            else:
                 hop = tools.trace_one_hop(sample.function_name, sample.file_path)
                 prompt = _build_context_prompt(sample, hop, tools, samples)
                 report = client.analyze(sample, context_prompt=prompt)
                 report.analysis_mode = "call_graph_context"
-
-            else:
-                # ── baseline single-pass ──────────────────────────────────────
-                report = client.analyze(sample)
 
             reports.append(report)
 
@@ -201,6 +216,7 @@ def analyze(
         source_path=source_label,
         model=config.llm.model,
         results_folder=config.output.analysis_folder,
+        filename="analysis.json" if run_name else None,
     )
 
     # ── summary ───────────────────────────────────────────────────────────────
@@ -225,6 +241,25 @@ def analyze(
                 typer.echo(f"             {r.file_path}")
             if r.explanation:
                 typer.echo(f"             {r.explanation[:120]}")
+
+    # ── re-export HTML with findings overlaid ─────────────────────────────────
+    if visualize and graph:
+        findings_dicts = [
+            {
+                "function_name":     r.function_name,
+                "file_path":         r.file_path,
+                "vulnerability_found": r.vulnerability_found,
+                "severity":          r.severity,
+            }
+            for r in reports
+        ]
+        plain = nodes_to_dict(graph)
+        html_out = export_html(
+            plain,
+            Path(config.output.context_folder) / "call_graph_annotated.html",
+            findings=findings_dicts,
+        )
+        typer.echo(f"\nAnnotated graph → {html_out}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +384,119 @@ def show(
         )
         if f.get("explanation"):
             typer.echo(f"       {f['explanation'][:120]}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# graph — build and/or visualize a call graph
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command()
+def graph(
+    path: Optional[str] = typer.Option(
+        None, "--path", "-p",
+        help="Source code path to build a call graph from (file or directory)."
+    ),
+    graph_file: Optional[str] = typer.Option(
+        None, "--graph-file", "-g",
+        help="Path to a previously saved call_graph_*.json to visualize without re-analysis."
+    ),
+    results_file: Optional[str] = typer.Option(
+        None, "--results", "-r",
+        help="Path to an analysis run JSON to overlay vulnerability findings on the graph."
+    ),
+    output_dir: str = typer.Option(
+        "experiments/results/context",
+        "--output-dir", "-o",
+        help="Directory to write graph files into."
+    ),
+    html: bool = typer.Option(True,  "--html/--no-html", help="Emit interactive HTML graph."),
+    dot:  bool = typer.Option(False, "--dot",            help="Also emit a Graphviz DOT file."),
+    config_path: Optional[str] = typer.Option(
+        None, "--config", "-c", help="Path to YAML config file."
+    ),
+):
+    """Build and visualize a call graph from source code or a saved graph JSON."""
+
+    if path is None and graph_file is None:
+        typer.echo("Error: provide --path or --graph-file", err=True)
+        raise typer.Exit(1)
+
+    # ── load findings for overlay (optional) ──────────────────────────────────
+    findings_dicts: list = []
+    if results_file:
+        import json as _json
+        rp = Path(results_file)
+        if not rp.exists():
+            typer.echo(f"Results file not found: {rp}", err=True)
+            raise typer.Exit(1)
+        with open(rp, encoding="utf-8") as f:
+            run_data = _json.load(f)
+        findings_dicts = run_data.get("findings", [])
+        typer.echo(f"Loaded {len(findings_dicts)} findings from {rp.name}")
+
+    # ── load or build graph ───────────────────────────────────────────────────
+    if graph_file:
+        plain = load_call_graph(graph_file)
+        if not plain:
+            typer.echo("Could not load call graph.", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"Loaded graph with {len(plain)} nodes from {graph_file}")
+    else:
+        config = load_config(config_path)
+        extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
+        typer.echo(f"\nIngesting {path} ...")
+        samples = extractor.from_path(path)
+        if not samples:
+            typer.echo("No functions extracted.")
+            raise typer.Exit(1)
+        typer.echo(f"  {len(samples)} functions extracted")
+
+        typer.echo("Building call graph ...")
+        builder = CallGraphBuilder(api_key=config.openai_api_key, model=config.llm.model)
+        g_nodes, name_index = builder.build(samples)
+
+        plain = nodes_to_dict(g_nodes)
+
+        context_out = save_call_graph(
+            graph=g_nodes,
+            output_folder=output_dir,
+            source_path=path,
+        )
+        typer.echo(f"Call graph saved → {context_out}")
+
+        # print summary
+        tools_tmp = ToolSet(g_nodes, name_index)
+        stats = tools_tmp.get_graph_summary()
+        typer.echo(
+            f"\nGraph summary: {stats['total_nodes']} nodes, {stats['total_edges']} edges\n"
+            f"  Entry points : {stats['entry_points']}\n"
+            f"  Taint sources: {stats['taint_sources']}\n"
+            f"  Taint sinks  : {stats['taint_sinks']}\n"
+            f"  Infrastructure: {stats['infrastructure']}\n"
+            f"  External refs: {stats['external_nodes']}"
+        )
+
+    # ── export ────────────────────────────────────────────────────────────────
+    out_dir = Path(output_dir)
+
+    if html:
+        html_name = "call_graph_annotated.html" if findings_dicts else "call_graph.html"
+        html_out = export_html(
+            plain,
+            out_dir / html_name,
+            findings=findings_dicts or None,
+        )
+        typer.echo(f"HTML graph → {html_out}")
+        typer.echo("  Open in a browser to explore interactively.")
+
+    if dot:
+        dot_out = export_dot(
+            plain,
+            out_dir / "call_graph.dot",
+            findings=findings_dicts or None,
+        )
+        typer.echo(f"DOT  graph → {dot_out}")
+        typer.echo("  Render: dot -Tpng call_graph.dot -o call_graph.png")
 
 
 if __name__ == "__main__":

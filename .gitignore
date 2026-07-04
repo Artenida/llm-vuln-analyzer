@@ -14,9 +14,8 @@ data/rag_corpus/embeddings/
 .env
 *.env
 
-# Experiment outputs
-experiments/results/
-experiments/datasets/
+# Experiments — local only, never committed
+experiments/
 
 # Editors
 .vscode/

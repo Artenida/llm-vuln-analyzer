@@ -37,7 +37,7 @@ class VulnerabilityReport:
     patch_suggestion: str
     confidence: float
     hallucination_flag: bool
-    analysis_mode: str = "single_function"
+    analysis_mode: str = "call_graph_context"
     error: Optional[str] = None
 
 
@@ -99,10 +99,14 @@ Option B — emit the final vulnerability report when you have enough informatio
 }
 
 Available tools:
-  get_callees(function_name)   — returns list of functions this function calls
-  get_callers(function_name)   — returns list of functions that call this function
-  get_source(function_name)    — returns source code of a specific function
+  get_callees(function_name)    — returns list of functions this function calls
+  get_callers(function_name)    — returns list of functions that call this function
+  get_source(function_name)     — returns source code of a specific function
   is_entry_point(function_name) — returns true if this is an HTTP handler / route
+  get_taint_path(function_name) — traces user-controlled data from HTTP entry points
+                                   through this function to dangerous sinks (SQL, shell, etc.)
+                                   Use this when you suspect an injection or flow-based vuln
+  get_node_info(function_name)  — returns full metadata including taint_source / taint_sink flags
 
 Rules:
 - Start by reading the target function code provided in the state.
@@ -157,9 +161,9 @@ class LLMClient:
     def analyze(
         self,
         sample: CodeSample,
-        context_prompt: Optional[str] = None,
+        context_prompt: str,
     ) -> VulnerabilityReport:
-        user_message = context_prompt or self._build_single_prompt(sample)
+        user_message = context_prompt
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
@@ -283,24 +287,6 @@ class LLMClient:
             is_final=True,
             report=report,
             reasoning=data.get("thought"),
-        )
-
-    def _build_single_prompt(self, sample: CodeSample) -> str:
-        code_section = f"## Function to analyse\n```\n{sample.code}\n```"
-        return (
-            f"Analyse the following {sample.language.value} code for security vulnerabilities.\n\n"
-            f"{code_section}\n\n"
-            "Respond with this exact JSON schema:\n"
-            "{\n"
-            '  "vulnerability_found": boolean,\n'
-            '  "cwe_id": string or null,\n'
-            '  "affected_lines": [list of integers],\n'
-            '  "severity": "low" | "medium" | "high" | "critical" | null,\n'
-            '  "explanation": string,\n'
-            '  "patch_suggestion": string,\n'
-            '  "confidence": float between 0.0 and 1.0,\n'
-            '  "hallucination_flag": boolean\n'
-            "}"
         )
 
 

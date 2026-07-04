@@ -28,6 +28,7 @@ def save_run(
     model: str,
     results_folder: str = "experiments/results",
     extra_meta: dict | None = None,
+    filename: str | None = None,
 ) -> Path:
     """
     Saves a full analysis run to a timestamped JSON file.
@@ -36,7 +37,7 @@ def save_run(
     run_id = _make_run_id(model)
     folder = Path(results_folder)
     folder.mkdir(parents=True, exist_ok=True)
-    out_path = folder / f"{run_id}.json"
+    out_path = folder / (filename if filename else f"{run_id}.json")
 
     # build a lookup: (function_name, file_path) -> (start_line, end_line)
     # used to clamp affected_lines to the actual function range
@@ -122,12 +123,13 @@ def save_extraction_results(
     samples: list[CodeSample],
     source_path: str,
     output_folder: str,
+    filename: str | None = None,
 ) -> Path:
     """Saves extracted functions before analysis phase."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path(output_folder)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"extraction_{ts}.json"
+    out_path = out_dir / (filename if filename else f"extraction_{ts}.json")
 
     results = []
     for sample in samples:
@@ -161,12 +163,13 @@ def save_call_graph(
     graph: dict,
     output_folder: str,
     source_path: str,
+    filename: str | None = None,
 ) -> Path:
     """Saves call graph output as JSON."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path(output_folder)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"call_graph_{ts}.json"
+    out_path = out_dir / (filename if filename else f"call_graph_{ts}.json")
 
     payload = {
         "source_path": source_path,
@@ -177,13 +180,15 @@ def save_call_graph(
 
     for name, node in graph.items():
         payload["graph"][name] = {
-            "function_name":    node.function_name,
-            "file_path":        node.file_path,
-            "callers":          node.callers,
-            "callees":          node.callees,
-            "is_entry_point":   node.is_entry_point,
+            "function_name":     node.function_name,
+            "file_path":         node.file_path,
+            "callers":           node.callers,
+            "callees":           node.callees,
+            "is_entry_point":    node.is_entry_point,
             "is_infrastructure": node.is_infrastructure,
-            "is_external":      node.is_external,
+            "is_external":       node.is_external,
+            "is_taint_source":   node.is_taint_source,
+            "is_taint_sink":     node.is_taint_sink,
         }
 
     with open(out_path, "w", encoding="utf-8") as f:
