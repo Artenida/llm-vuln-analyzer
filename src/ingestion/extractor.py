@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Union
 
 from src.models import EXTENSION_MAP, CodeSample, Language
+from src.models.code_sample import RouteDefinition
 from src.ingestion.parser import TreeSitterParser
 from src.ingestion.import_extractor import ImportExtractor
 from src.ingestion.route_extractor import RouteExtractor
@@ -34,6 +35,16 @@ class CodeExtractor:
         self.parser = TreeSitterParser(max_function_lines=max_function_lines)
         self._import_extractor = ImportExtractor()
         self._route_extractor = RouteExtractor()
+        # Project-wide route registrations, collected across every file seen —
+        # independent of whether that file has any function bodies. Route files
+        # (e.g. Express `router.get(...)` wiring) typically have none, so this
+        # cannot live on a per-function CodeSample the way imports do.
+        self._all_routes: list[RouteDefinition] = []
+
+    @property
+    def all_routes(self) -> list[RouteDefinition]:
+        """All route registrations found across the last from_path()/from_snippet() call."""
+        return self._all_routes
 
     # ── public entry points ───────────────────────────────────────────────────
 
@@ -42,6 +53,8 @@ class CodeExtractor:
         Accepts a file or directory path.
         Returns all extracted functions as CodeSample objects.
         """
+        self._all_routes = []
+
         p = Path(path).resolve()
         if not p.exists():
             raise FileNotFoundError(f"Path does not exist: {p}")
@@ -59,6 +72,8 @@ class CodeExtractor:
         Parses an inline code string.
         language should be 'python', 'javascript', 'c', or 'cpp'.
         """
+        self._all_routes = []
+
         if isinstance(language, str):
             try:
                 language = Language(language)
@@ -116,6 +131,7 @@ class CodeExtractor:
         # File-level extractions — shared across all functions in this file
         imports = self._import_extractor.extract(content)
         routes = self._route_extractor.extract(content)
+        self._all_routes.extend(routes)
 
         samples = []
         for fn in functions:

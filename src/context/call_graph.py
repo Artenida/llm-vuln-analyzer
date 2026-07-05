@@ -80,9 +80,53 @@ class CallGraphBuilder:
 
         return any(p in function_name.lower() for p in ENTRY_POINT_PATTERNS)
 
+    def _apply_route_entry_points(
+        self,
+        graph: Dict[str, "CallGraphNode"],
+        route_defs: List,
+    ) -> None:
+        name_to_nodes: Dict[str, List[str]] = {}
+        for node_id, node in graph.items():
+            if node.is_external:
+                continue
+            name_to_nodes.setdefault(node.function_name, []).append(node_id)
+
+        for route in route_defs:
+            for h in route.handlers:
+                name = h.strip()
+                if not name:
+                    continue
+                # handlers referenced as `object.method` (e.g. billingController.payInvoice)
+                # never carry the object prefix on the extracted function itself
+                lookup_name = name.split(".")[-1] if "." in name else name
+                candidates = name_to_nodes.get(lookup_name, [])
+
+                if len(candidates) == 1:
+                    graph[candidates[0]].is_entry_point = True
+                elif len(candidates) > 1:
+                    preferred = [
+                        nid for nid in candidates
+                        if any(
+                            x in graph[nid].file_path.lower()
+                            for x in ("controller", "route", "middleware", "api")
+                        )
+                    ]
+                    if len(preferred) == 1:
+                        graph[preferred[0]].is_entry_point = True
+                    # else: ambiguous with no clear winner — leave as-is rather
+                    # than risk flagging the wrong (e.g. service-layer) function
+
     def build(
-        self, samples: List[CodeSample]
+        self,
+        samples: List[CodeSample],
+        routes: Optional[List] = None,
     ) -> Tuple[Dict[str, "CallGraphNode"], Dict[str, Set[str]]]:
+        """
+        routes: project-wide RouteDefinition list (e.g. CodeExtractor.all_routes).
+        Route files (Express `router.get(...)` wiring) typically have no function
+        bodies of their own, so this can't be recovered from `sample.routes` alone
+        — falls back to scanning samples for callers that don't pass it explicitly.
+        """
 
         graph: Dict[str, CallGraphNode] = {}
         name_index: Dict[str, Set[str]] = {}
@@ -116,6 +160,18 @@ class CallGraphBuilder:
             )
 
             name_index.setdefault(s.function_name, set()).add(node_id)
+
+        # Function names directly registered as Express route handlers — a more
+        # precise entry-point signal than name/path guessing, applied once nodes
+        # (and therefore name collisions across files) are known. A route name
+        # that matches more than one function (e.g. a controller and the service
+        # it delegates to sharing a name) is only resolved if exactly one
+        # candidate also matches the existing path heuristic — otherwise it's
+        # left alone rather than risk marking the wrong one.
+        route_defs = routes if routes is not None else [
+            r for s in samples for r in s.routes
+        ]
+        self._apply_route_entry_points(graph, route_defs)
 
         # ─────────────────────────────────────────────
         # 2. EDGE CREATION

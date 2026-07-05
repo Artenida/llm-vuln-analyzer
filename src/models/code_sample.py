@@ -12,14 +12,6 @@ class ImportReference:
 
 
 @dataclass
-class CallSite:
-    raw_call: str
-    line: int
-    column: int
-    candidate_targets: List[str] = field(default_factory=list)
-
-
-@dataclass
 class RouteDefinition:
     method: str
     path: str
@@ -36,7 +28,6 @@ class CodeSample:
     end_line: int
     imports: List[ImportReference] = field(default_factory=list)
     exports: List[str] = field(default_factory=list)
-    call_sites: List[CallSite] = field(default_factory=list)
     routes: List[RouteDefinition] = field(default_factory=list)
     class_name: Optional[str] = None
     is_async: bool = False

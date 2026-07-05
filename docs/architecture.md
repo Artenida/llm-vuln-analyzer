@@ -179,12 +179,22 @@ Converts source files into `CodeSample` objects — one per function.
 | `file_path`, `start_line`, `end_line` | tree-sitter |
 | `ast_node`, `raw_content` | tree-sitter |
 | `imports` | `ImportExtractor.extract()` |
-| `routes` | `RouteExtractor.extract()` |
+| `routes` | `RouteExtractor.extract()` (this file's routes only — see note below) |
 
 `start_line`/`end_line` are the same 1-indexed, inclusive line range used
 later by the `patch --apply` step to splice patched code back into a file,
 so they must stay accurate — this is the reason patch generation re-runs
 extraction rather than trusting cached line numbers from an old run.
+
+**`CodeExtractor.all_routes`** — a project-wide `List[RouteDefinition]`,
+accumulated across every file seen during `from_path()`/`from_snippet()`,
+independent of whether that file has any function bodies. This exists
+because `CodeSample.routes` alone can't carry route data reliably: a typical
+Express routes file (`router.get(path, handler)` wiring) has zero function
+definitions of its own, so no `CodeSample` is ever created to hold its
+routes — `_extract_samples()` would otherwise extract and silently discard
+them. `CallGraphBuilder.build(samples, routes=...)` takes this list to drive
+entry-point detection (see Layer 2).
 
 ---
 
@@ -194,12 +204,15 @@ Builds a static + AI hybrid call graph from the `CodeSample` list.
 
 | File | Role |
 |------|------|
-| `call_graph.py` | Core builder: creates nodes, resolves edges, runs taint analysis |
+| `call_graph.py` | Core builder: creates nodes, resolves edges, runs taint analysis, resolves route-based entry points |
 | `symbol_resolver.py` | Import-aware static resolution (`alias.method → file::function`) |
 | `llm_edge_resolver.py` | AI fallback for edges that static resolution cannot resolve; uses cache |
 | `edge_cache.py` | Persistent JSON cache — avoids re-calling the LLM for the same edge |
-| `graph_traversal.py` | BFS downstream traversal (subgraph extraction) |
-| `context_builder.py` | Builds a `FunctionContext` (target + 1-hop callers/callees) |
+
+(1-hop caller/callee lookups and BFS traversal — for the ReAct agent's tools
+and for taint-path tracing — live on `ToolSet`, see Layer 3. Earlier,
+separate `GraphTraversal` and `ContextBuilder` classes duplicated that same
+functionality and were removed as dead code.)
 
 ### `CallGraphNode` structure
 
@@ -228,6 +241,23 @@ raw_call  (e.g. "authService.registerUser")
   4. LLM resolver with persistent cache
   5. External node  →  "external::authService.registerUser"
 ```
+
+### Entry-point detection
+
+`_is_entry_point()` first checks name/path heuristics (function name matches
+`handler`/`route`/`endpoint`/`controller`/`main`, or file path contains
+`controller`/`route`/`middleware`/`api`). After all nodes exist,
+`_apply_route_entry_points()` layers a more precise signal on top: functions
+directly registered as Express route handlers (`router.get(path, handler)`,
+sourced from `CodeExtractor.all_routes`) are marked `is_entry_point = True`
+even if their name/path wouldn't otherwise match. Handler names referenced as
+`object.method` (e.g. `billingController.payInvoice`) are matched on the bare
+method name, since extracted function names never carry the object prefix.
+If a route handler's name collides with another function elsewhere (e.g. a
+thin controller and the service it delegates to sharing a name), the match
+is only applied when exactly one candidate also satisfies the path
+heuristic — otherwise it's left alone rather than risk marking the wrong
+(e.g. service-layer) function as a taint source.
 
 ### Taint detection (automatic, no LLM)
 
@@ -340,7 +370,7 @@ findings written by `analyze` always leave these at their defaults.
 |------|------|
 | `run_saver.py` | `save_run()`, `save_extraction_results()`, `save_call_graph()`, `save_patches()` — JSON persistence |
 | `export_graph.py` | `export_html()` (pyvis interactive), `export_dot()` (Graphviz) |
-| `save_graph.py` | `load_call_graph()`, `merge_call_graphs()`, `graph_stats()` |
+| `save_graph.py` | `load_call_graph()` — reloads a saved `call_graph.json` back into a plain dict |
 | `patch_generator.py` | `PatchGenerator` — LLM call → unified diff (Layer 4a) |
 | `patch_validator.py` | `PatchValidator` — in-memory patch application + syntax check (Layer 4a) |
 
@@ -407,8 +437,7 @@ patch_suggestion)`.
 | File | Contents |
 |------|----------|
 | `models.py` | `Language` enum, `EXTENSION_MAP` |
-| `code_sample.py` | `CodeSample`, `ImportReference`, `CallSite`, `RouteDefinition` |
-| `route_models.py` | Route model types |
+| `code_sample.py` | `CodeSample`, `ImportReference`, `RouteDefinition` |
 
 ---
 
@@ -418,7 +447,7 @@ patch_suggestion)`.
 experiments/configs/default.yaml
   → load_config()
   → AppConfig {
-      llm:       LLMConfig         (provider, model)
+      llm:       LLMConfig         (model)
       ingestion: IngestionConfig   (max_function_lines, skip_dirs)
       output:    OutputConfig      (folder paths)
       agent:     AgentConfig       (react_mode, max_steps)

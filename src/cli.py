@@ -147,7 +147,7 @@ def analyze(
 
     typer.echo("\nBuilding call graph...")
     builder = CallGraphBuilder(api_key=config.openai_api_key, model=config.llm.model)
-    graph, name_index = builder.build(samples)
+    graph, name_index = builder.build(samples, routes=extractor.all_routes)
 
     context_out = save_call_graph(
         graph=graph,
@@ -475,7 +475,7 @@ def graph(
 
         typer.echo("Building call graph ...")
         builder = CallGraphBuilder(api_key=config.openai_api_key, model=config.llm.model)
-        g_nodes, name_index = builder.build(samples)
+        g_nodes, name_index = builder.build(samples, routes=extractor.all_routes)
 
         plain = nodes_to_dict(g_nodes)
 

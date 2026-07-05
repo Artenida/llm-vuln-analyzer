@@ -5,8 +5,6 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from src.models.code_sample import CallSite
-
 from tree_sitter import Language, Node, Parser, Tree
 
 logger = logging.getLogger(__name__)
@@ -305,22 +303,4 @@ class TreeSitterParser:
                 walk(child)
 
         walk(node)
-        return results
-
-    def extract_call_sites(self, content: str):
-        import re
-
-        pattern = re.compile(r'(\w+\.\w+)\(')
-
-        results = []
-
-        for match in pattern.finditer(content):
-            results.append(
-                CallSite(
-                    raw_call=match.group(1),
-                    line=0,
-                    column=0,
-                )
-            )
-
         return results

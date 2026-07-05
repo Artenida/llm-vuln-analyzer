@@ -13,7 +13,6 @@ import yaml
 
 @dataclass
 class LLMConfig:
-    provider: str = "openai"
     model: str = "o4-mini"
     #max_tokens: int = 3000        # bumped from 2000 — longer prompts need more room
     #temperature: float = 0.0
@@ -77,7 +76,6 @@ def load_config(path: Optional[str] = None) -> AppConfig:
 
     return AppConfig(
         llm=LLMConfig(
-            provider=llm_raw.get("provider", "openai"),
             model=llm_raw.get("model", "o4-mini"),
             #max_tokens=llm_raw.get("max_tokens", 3000),
             #temperature=llm_raw.get("temperature", 0.0),
