@@ -39,6 +39,9 @@ class VulnerabilityReport:
     hallucination_flag: bool
     analysis_mode: str = "call_graph_context"
     error: Optional[str] = None
+    unified_diff: str = ""
+    patch_valid: Optional[bool] = None
+    patch_error: Optional[str] = None
 
 
 @dataclass

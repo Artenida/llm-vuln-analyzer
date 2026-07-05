@@ -4,10 +4,14 @@ CLI entry point.
 Commands:
   analyze    Run vulnerability analysis on a path or snippet
   show       Pretty-print a saved results JSON file
+  graph      Build and/or visualize a call graph
+  patch      Generate + validate fixes for flagged functions in a completed run
 
 Key flags:
   --react           Use ReAct agent loop (reason->act->observe) instead of single-pass
   --dry-run         Extract + build graph only, no LLM calls
+  patch --apply     Opt-in: write validated patches into the actual source files
+                    (default `patch` behavior only saves a reviewable JSON artifact)
 
 Analysis always builds the call graph and injects context into the prompt.
 Use --react to switch from single-pass semantic to the agentic ReAct loop.
@@ -31,7 +35,9 @@ import typer
 from src.config import load_config
 from src.context.call_graph import CallGraphBuilder
 from src.ingestion.extractor import CodeExtractor
-from src.results import save_extraction_results, save_run, save_call_graph
+from src.results import save_extraction_results, save_run, save_call_graph, save_patches
+from src.results.patch_generator import PatchGenerator
+from src.results.patch_validator import PatchValidator
 from src.results.export_graph import export_dot, export_html
 from src.results.save_graph import load_call_graph
 from src.context.call_graph import nodes_to_dict
@@ -513,6 +519,190 @@ def graph(
         )
         typer.echo(f"DOT  graph → {dot_out}")
         typer.echo("  Render: dot -Tpng call_graph.dot -o call_graph.png")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# patch — generate + validate fixes for flagged functions in a completed run
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command()
+def patch(
+    results_file: str = typer.Option(
+        ..., "--results", "-r", help="Path to a completed analysis run JSON."
+    ),
+    path: Optional[str] = typer.Option(
+        None, "--path", "-p",
+        help="Source path override for re-extracting function bodies "
+             "(defaults to the run's recorded source_path)."
+    ),
+    output_dir: str = typer.Option(
+        "experiments/results/patches", "--output-dir", "-o",
+        help="Directory to write the patches JSON into."
+    ),
+    config_path: Optional[str] = typer.Option(
+        None, "--config", "-c", help="Path to YAML config file."
+    ),
+    apply: bool = typer.Option(
+        False, "--apply",
+        help="Write validated patches into the actual source files. "
+             "Opt-in only — never the default. Prompts for confirmation."
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Skip the confirmation prompt when using --apply (non-interactive)."
+    ),
+):
+    """
+    Generate and validate security patches for the flagged functions in a
+    completed analysis run. By default this only writes a reviewable JSON
+    artifact (diffs + validity) — the analyzed project is never modified
+    unless --apply is explicitly passed.
+    """
+    rp = Path(results_file)
+    if not rp.exists():
+        typer.echo(f"Results file not found: {rp}", err=True)
+        raise typer.Exit(1)
+
+    with open(rp, encoding="utf-8") as f:
+        run_data = json.load(f)
+
+    run_id = run_data.get("run_id", rp.stem)
+    source_path = path or run_data.get("source_path")
+    findings = [f for f in run_data.get("findings", []) if f.get("vulnerability_found")]
+
+    if not findings:
+        typer.echo("No vulnerabilities found in this run — nothing to patch.")
+        raise typer.Exit(0)
+
+    if not source_path or source_path == "<snippet>":
+        typer.echo(
+            "Error: cannot re-extract source for this run "
+            "(source_path missing or a snippet run). Pass --path explicitly.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    config = load_config(config_path)
+
+    typer.echo(f"\nRe-extracting source from {source_path} to recover function bodies...")
+    extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
+    samples = extractor.from_path(source_path)
+    sample_index = {(s.function_name, s.file_path): s for s in samples}
+
+    generator = PatchGenerator(api_key=config.openai_api_key, model=config.llm.model)
+    validator = PatchValidator()
+
+    patches: list = []
+    typer.echo(f"Generating patches for {len(findings)} flagged function(s)...\n")
+
+    for i, finding in enumerate(findings, 1):
+        fn_name = finding.get("function_name")
+        file_path = finding.get("file_path")
+        typer.echo(f"  [{i:>2}/{len(findings)}] {fn_name:<30}", nl=False)
+
+        sample = sample_index.get((fn_name, file_path))
+        if sample is None:
+            typer.echo(" → SKIP (source not found)")
+            patches.append({
+                "function_name": fn_name, "file_path": file_path,
+                "cwe_id": finding.get("cwe_id"), "severity": finding.get("severity"),
+                "start_line": None, "end_line": None,
+                "unified_diff": "", "patch_valid": False,
+                "patch_error": "source_not_found", "patched_code": None,
+            })
+            continue
+
+        result = generator.generate(
+            code=sample.code,
+            explanation=finding.get("explanation", ""),
+            cwe_id=finding.get("cwe_id"),
+            function_name=fn_name,
+            language=sample.language.value,
+            patch_suggestion=finding.get("patch_suggestion", ""),
+        )
+
+        if result.error:
+            typer.echo(f" → GEN-ERROR ({result.error})")
+            patches.append({
+                "function_name": fn_name, "file_path": file_path,
+                "cwe_id": finding.get("cwe_id"), "severity": finding.get("severity"),
+                "start_line": sample.start_line, "end_line": sample.end_line,
+                "unified_diff": "", "patch_valid": False,
+                "patch_error": result.error, "patched_code": None,
+            })
+            continue
+
+        validation = validator.validate(sample.code, result.unified_diff, sample.language.value)
+        status = "VALID" if validation.valid else f"INVALID ({validation.error})"
+        typer.echo(f" → {status}")
+
+        patches.append({
+            "function_name": fn_name, "file_path": file_path,
+            "cwe_id": finding.get("cwe_id"), "severity": finding.get("severity"),
+            "start_line": sample.start_line, "end_line": sample.end_line,
+            "unified_diff": result.unified_diff,
+            "patch_valid": validation.valid,
+            "patch_error": validation.error,
+            "patched_code": validation.patched_code,
+        })
+
+    out_path = save_patches(
+        patches=patches,
+        run_id=run_id,
+        source_path=source_path,
+        output_folder=output_dir,
+    )
+
+    valid_count = sum(1 for p in patches if p["patch_valid"])
+    typer.echo("\n" + "─" * 50)
+    typer.echo(f"Total patches : {len(patches)}")
+    typer.echo(f"Valid         : {valid_count}")
+    typer.echo(f"Invalid       : {len(patches) - valid_count}")
+    typer.echo(f"Patches saved → {out_path}")
+
+    if not apply:
+        typer.echo("\nSource project untouched. Re-run with --apply to write validated patches to disk.")
+        return
+
+    # ── opt-in: write validated patches into the actual source files ─────────
+    applicable = [p for p in patches if p["patch_valid"]]
+    if not applicable:
+        typer.echo("\n--apply requested but no valid patches to write.")
+        return
+
+    typer.echo(f"\n--apply requested: this will OVERWRITE {len(applicable)} function(s) in the source project:")
+    for p in applicable:
+        typer.echo(f"  {p['file_path']}  ::  {p['function_name']}")
+
+    if not yes:
+        confirmed = typer.confirm("\nProceed with writing these patches to disk?", default=False)
+        if not confirmed:
+            typer.echo("Aborted — no files were modified.")
+            raise typer.Exit(0)
+
+    written = 0
+    for p in applicable:
+        try:
+            _write_patch_to_file(p)
+            written += 1
+        except Exception as e:
+            typer.echo(f"  Failed to apply to {p['file_path']}::{p['function_name']}: {e}", err=True)
+
+    typer.echo(f"\n{written}/{len(applicable)} patch(es) written to disk.")
+
+
+def _write_patch_to_file(patch_record: dict) -> None:
+    """Replaces a function's line range in its source file with validated patched code."""
+    file_path = Path(patch_record["file_path"])
+    start_line = patch_record["start_line"]
+    end_line = patch_record["end_line"]
+
+    original = file_path.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+    patched_lines = patch_record["patched_code"].splitlines(keepends=True)
+
+    lines[start_line - 1:end_line] = patched_lines
+    file_path.write_text("".join(lines), encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -132,6 +132,9 @@ def save_run(
             "analysis_mode":       report.analysis_mode,
             "error":               report.error,
             "duplicate_group":     group_id if is_dup else None,
+            "unified_diff":        report.unified_diff,
+            "patch_valid":         report.patch_valid,
+            "patch_error":         report.patch_error,
         })
 
     with open(out_path, "w", encoding="utf-8") as f:
@@ -178,6 +181,45 @@ def save_extraction_results(
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
+    return out_path
+
+
+def save_patches(
+    patches: list[dict],
+    run_id: str,
+    source_path: str,
+    output_folder: str = "experiments/results/patches",
+    filename: str | None = None,
+) -> Path:
+    """
+    Saves generated+validated patches for a completed run.
+    Never touches the analyzed source project — this is a standalone reviewable
+    artifact (diffs + validity), source project untouched unless --apply is used.
+    """
+    folder = Path(output_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    out_path = folder / (filename if filename else f"{run_id}_patches.json")
+
+    total = len(patches)
+    valid = sum(1 for p in patches if p.get("patch_valid"))
+
+    payload: dict[str, Any] = {
+        "schema_version": "1.0",
+        "run_id": run_id,
+        "source_path": source_path,
+        "timestamp": datetime.now().isoformat(),
+        "summary": {
+            "total_patches": total,
+            "valid": valid,
+            "invalid": total - valid,
+        },
+        "patches": patches,
+    }
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    logger.info("Patches saved → %s", out_path)
     return out_path
 
 

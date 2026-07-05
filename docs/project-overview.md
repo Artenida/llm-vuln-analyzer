@@ -109,6 +109,20 @@ python -m src.cli graph --path path/to/project --output-dir experiments/runs/my_
 
 ---
 
+### `patch` — Generate + validate fixes for flagged functions
+
+See [`docs/patching.md`](patching.md) for the full design. Quick reference:
+
+```powershell
+# Generate + validate patches (default: JSON artifact only, source untouched)
+python -m src.cli patch --results experiments/runs/auth_agentic/analysis.json
+
+# Opt-in: write validated patches into the actual source files (prompts for confirmation)
+python -m src.cli patch --results experiments/runs/auth_agentic/analysis.json --apply
+```
+
+---
+
 ### `show` — Pretty-print a saved analysis run
 
 ```powershell
