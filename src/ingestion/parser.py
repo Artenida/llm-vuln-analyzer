@@ -107,10 +107,16 @@ def _extract_name(node: Node, language: str,
 
     elif language == "javascript":
 
-        for child in node.children:
-            if child.type == "identifier":
-                return node_text(child, source_bytes)
-        
+        # arrow_function has no name of its own — a bare `identifier` child
+        # of an arrow_function is its unparenthesized single parameter
+        # (e.g. `err => {...}`), not a name. Only function_declaration /
+        # function_expression / method_definition have a genuine name
+        # identifier as a direct child.
+        if node.type != "arrow_function":
+            for child in node.children:
+                if child.type == "identifier":
+                    return node_text(child, source_bytes)
+
         parent = node.parent
 
         if parent.type in {
@@ -181,6 +187,13 @@ def _walk_functions(node: Node,
 
     if node.type in target_types:
 
+        name = _extract_name(node, language, source_bytes)
+
+        # Anonymous inline callbacks (e.g. `.find((o) => ...)`) are not
+        # separately analyzable units — skip them and don't descend further.
+        if name == "<anonymous>":
+            return
+
         start = node.start_point[0] + 1
         end = node.end_point[0] + 1
 
@@ -190,12 +203,27 @@ def _walk_functions(node: Node,
 
             results.append(
                 FunctionNode(
-                    name=_extract_name(node, language, source_bytes),
+                    name=name,
                     body=node_text(node, source_bytes),
                     start_line=start,
                     end_line=end,
                     ast_node=node,
                 )
+            )
+
+        # Named methods are sometimes assigned inside another named
+        # function's body instead of declared at the top level — e.g. the
+        # common `const X = function(db) { this.method = (...) => {...}; }`
+        # constructor pattern. Descend into this function's body too so
+        # those nested named methods are extracted as their own units,
+        # rather than disappearing into the outer function's source.
+        for child in node.children:
+            _walk_functions(
+                child,
+                language,
+                source_bytes,
+                results,
+                max_lines,
             )
 
         return
