@@ -239,6 +239,63 @@ def _walk_functions(node: Node,
 
 
 # ──────────────────────────────────────────────────────
+# Nested-method masking
+# ──────────────────────────────────────────────────────
+#
+# A constructor/factory pattern like:
+#   const X = function(db) {
+#       this.foo = function(...) { ...vulnerable code... };
+#   };
+# extracts BOTH `X` and `this.foo` as separate FunctionNodes (see the
+# recursion above), but `X`'s own body text still literally contains
+# `this.foo`'s source — so an LLM judging `X` sees (and can misattribute)
+# whatever `this.foo` does, even though `this.foo` is independently
+# analyzed under its own name. Mask out each directly-nested, separately
+# extracted function's text from its ancestor's body so the ancestor's own
+# analyzed code no longer contains it. This only touches the FunctionNode.body
+# used for LLM prompts — call graph edges are extracted from raw_content/the
+# original ast_node byte offsets (see CallGraphBuilder.build), so masking
+# does not affect call/taint graph accuracy, and get_source(<nested name>)
+# still returns the nested function's own untouched body.
+
+def _contains(outer: Node, inner: Node) -> bool:
+    if outer.start_byte == inner.start_byte and outer.end_byte == inner.end_byte:
+        return False
+    return outer.start_byte <= inner.start_byte and inner.end_byte <= outer.end_byte
+
+
+def _build_masked_body(node: Node, nested: list, source_bytes: bytes) -> str:
+    nested_sorted = sorted(nested, key=lambda f: f.ast_node.start_byte)
+    chunks = []
+    cursor = node.start_byte
+    for f in nested_sorted:
+        n = f.ast_node
+        chunks.append(source_bytes[cursor:n.start_byte])
+        line_count = n.end_point[0] - n.start_point[0] + 1
+        marker = f"/* --- nested method '{f.name}' analyzed separately --- */"
+        placeholder = "\n".join([marker] + [""] * (line_count - 1))
+        chunks.append(placeholder.encode("utf-8"))
+        cursor = n.end_byte
+    chunks.append(source_bytes[cursor:node.end_byte])
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _mask_nested_bodies(results: list, source_bytes: bytes) -> None:
+    for outer in results:
+        contained = [r for r in results if r is not outer and _contains(outer.ast_node, r.ast_node)]
+        if not contained:
+            continue
+        # Only mask directly-nested functions — a function nested inside another
+        # contained function is already removed when that closer ancestor is masked.
+        direct = [
+            c for c in contained
+            if not any(other is not c and _contains(other.ast_node, c.ast_node) for other in contained)
+        ]
+        if direct:
+            outer.body = _build_masked_body(outer.ast_node, direct, source_bytes)
+
+
+# ──────────────────────────────────────────────────────
 # Public parser
 # ──────────────────────────────────────────────────────
 
@@ -295,6 +352,8 @@ class TreeSitterParser:
             results,
             self.max_function_lines,
         )
+
+        _mask_nested_bodies(results, source_bytes)
 
         return results
 

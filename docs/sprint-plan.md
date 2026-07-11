@@ -60,7 +60,7 @@ Build a production-grade LLM-powered security analysis tool that can scan a real
 
 ---
 
-## Sprint 4 — Business Logic & Authorization Analysis (NEXT)
+## Sprint 4 — Business Logic & Authorization Analysis (DONE)
 
 **Goal:** Detect vulnerabilities that are invisible to syntactic/CWE-pattern
 analysis because the code is syntactically fine but violates an
@@ -136,30 +136,85 @@ false-positive pattern).
 
 ---
 
-## Sprint 5 — Scale & Multi-Language
+## Sprint 5 — Automated Evaluation Framework (DONE)
+
+**Status:** Complete — see `docs/evaluation.md` for full design.
+
+**Goal:** Sprints 1, 3, and 4 all measured precision/recall by hand — counting
+matches between a run's `findings[]` and a ground truth dataset in prose (see
+`docs/business-logic.md`'s "3 Rounds" section). That doesn't scale past a
+couple of dozen functions and isn't reproducible. Replace it with a
+deterministic, offline scoring step over already-completed `analyze` runs —
+no LLM calls, no changes to the ground truth schema or `VulnerabilityReport`.
+
+### Tasks
+
+#### 5.1 Ground truth loader
+- `src/evaluation/ground_truth.py` — `GroundTruthEntry` / `GroundTruthDataset` /
+  `load_ground_truth()`, matching the existing `experiments/ground_truth/*.json`
+  schema unchanged
+
+#### 5.2 Matching + scoring
+- `src/evaluation/evaluator.py` — matches each ground truth row to a finding by
+  `function_name`, disambiguating by `file_path` suffix when a name repeats
+  across files (e.g. `auth-service`'s duplicated `rateLimiter` bug); rows that
+  can't be disambiguated are reported separately rather than guessed
+- TP/FP/FN/TN confusion matrix + precision/recall/F1 at the instance level
+- CWE-exactness accuracy computed independently of detection accuracy
+- Deduplicated (`duplicate_of`-aware) unique-vulnerability recall — the
+  "N/N recall" style number used in `docs/business-logic.md`
+- Per-CWE breakdown (planted / detected / correct-CWE)
+- Hallucination rate restricted to flagged (TP+FP) findings
+
+#### 5.3 CLI `evaluate` command
+- `--results` (repeatable — pass more than once to compare modes/models side
+  by side), `--ground-truth`, `--output-dir`
+- Saves `experiments/results/evaluations/eval_<run_id>.json` per run; prints a
+  markdown comparison table across runs when more than one `--results` is given
+- Purely read-only: never touches the run file, ground truth file, or analyzed project
+
+#### 5.4 Tests
+- `tests/test_evaluation.py` — synthetic ground truth + synthetic run JSON,
+  no LLM calls: TP/FP/FN scoring, duplicate-name file disambiguation, dedup
+  recall, unmatched-finding exclusion, hallucination rate, JSON round-trip,
+  comparison table formatting
+
+**Exit criteria:**
+- [x] `evaluate` reproduces the `auth-service` Sprint 1 numbers (11/11 detection
+      instances correct, 10/10 deduplicated recall) with no manual counting
+- [x] Running the same ground truth against two archived runs
+      (`gpt-4o-mini` vs `o4-mini`) reproduces the known qualitative Sprint 1
+      finding as a concrete number (precision 0.79 vs 1.00 at equal recall)
+- [x] `evaluate` never writes to the analyzed project, the run file, or the
+      ground truth file
+- [x] `docs/evaluation.md` written documenting the matching rules and metrics
+
+---
+
+## Sprint 6 — Scale & Multi-Language
 
 **Goal:** Analyze real-world open-source repositories (hundreds to thousands of functions) without hitting API rate limits or cost ceilings.
 
 ### Tasks
 
-#### 5.1 Batch Analysis
+#### 6.1 Batch Analysis
 - Process functions in parallel batches (configurable concurrency)
 - Rate-limit aware: exponential backoff on 429s
 - Resume from last checkpoint if interrupted
 
-#### 5.2 Incremental / Cached Analysis
+#### 6.2 Incremental / Cached Analysis
 - Hash each function's code; skip re-analysis if hash matches a cached result
 - Only re-analyze functions that changed since last run (git-diff integration)
 
-#### 5.3 TypeScript Support
+#### 6.3 TypeScript Support
 - TypeScript is currently mapped to the JavaScript grammar — good for syntax but misses type annotations
 - Add `tree-sitter-typescript` grammar for richer type-aware context in prompts
 
-#### 5.4 Large-Function Handling
+#### 6.4 Large-Function Handling
 - Functions over `max_function_lines` (currently 200) are silently skipped
 - Instead: chunk them into overlapping windows and analyze each window; merge results
 
-#### 5.5 Filtering & Triage UI
+#### 6.5 Filtering & Triage UI
 - `show` command enhancements: filter by severity, CWE, file, function name
 - Export to SARIF format for GitHub Code Scanning / VS Code integration
 
@@ -190,5 +245,6 @@ false-positive pattern).
 | 2 | *(covered by updates to `docs/project-overview.md` — call graph visualization, taint tracking)* |
 | 3 | `docs/patching.md` — patch generation & validation approach |
 | 4 | `docs/business-logic.md` — business-logic CWE taxonomy, checklist, evaluation results |
-| 5 | `docs/scaling.md` — batch processing, caching, incremental analysis |
-| 5 | `docs/sarif-integration.md` — GitHub Code Scanning setup |
+| 5 | `docs/evaluation.md` — automated precision/recall/F1 harness, matching rules |
+| 6 | `docs/scaling.md` — batch processing, caching, incremental analysis |
+| 6 | `docs/sarif-integration.md` — GitHub Code Scanning setup |

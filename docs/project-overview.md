@@ -135,6 +135,29 @@ python -m src.cli patch --results experiments/runs/auth_agentic/analysis.json --
 
 ---
 
+### `evaluate` — Score analysis run(s) against a ground truth dataset
+
+See [`docs/evaluation.md`](evaluation.md) for the full design. Quick reference:
+
+```powershell
+# Score one run against a ground truth dataset
+python -m src.cli evaluate --results experiments/runs/auth_agentic/analysis.json \
+                            --ground-truth experiments/ground_truth/auth-service.json
+
+# Compare two runs (e.g. semantic vs agentic, or two models) against the same dataset
+python -m src.cli evaluate --results experiments/runs/auth_semantic/analysis.json \
+                            --results experiments/runs/auth_agentic/analysis.json \
+                            --ground-truth experiments/ground_truth/auth-service.json
+```
+
+Computes precision/recall/F1, CWE accuracy on true positives, deduplicated
+(`duplicate_of`-aware) unique-vulnerability recall, a per-CWE breakdown, and
+hallucination rate on flagged findings. Saves
+`experiments/results/evaluations/eval_<run_id>.json` per run — read-only,
+never touches the run file, ground truth file, or analyzed project.
+
+---
+
 ### `show` — Pretty-print a saved analysis run
 
 ```powershell

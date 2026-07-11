@@ -128,35 +128,59 @@ Rules:
     executes it (e.g. a db.execute(query) wrapper) is NOT vulnerable for
     injection — the vulnerability is in the CALLER that builds the string.
     Use get_callers + get_source to find and flag the builder, not the executor.
+ - If you see a comment of the exact form
+    `/* --- nested method 'X' analyzed separately --- */` in place of a
+    method body, that is expected and NOT obfuscated/incomplete/suspicious
+    code — `X` is a nested method (e.g. a constructor's `this.foo = function
+    () {...}`) extracted and analyzed independently under its own name.
+    Do not flag the function containing this comment based on it, and do not
+    treat the comment itself as evidence of anything. If you need to inspect
+    `X`, call get_source(X) or get_callees/get_taint_path — and attribute
+    any finding you make there to `X`, not to the function containing the
+    comment.
 
 CWE assignment rules — use the MOST SPECIFIC applicable CWE:
-  CWE-89   SQL/NoSQL built by string concat or template literal interpolation
-  CWE-347  JWT or token accepted without signature verification (jwt.decode vs jwt.verify)
-  CWE-798  Hardcoded credentials, secrets, API keys, or static bypass codes
-  CWE-20   Security decision based on a client-supplied header (e.g. X-Forwarded-For for IP)
-  CWE-306  Security step skipped (e.g. current-password not verified before change)
-  CWE-208  Non-constant-time comparison of secrets (timing attack)
-  CWE-269  Role or privilege accepted directly from user-controlled input
-  CWE-639  Object/resource fetched or mutated by a client-supplied id with no check that
-           it belongs to the requesting user (IDOR / broken object-level authorization)
-  CWE-862  A privileged or sensitive action (refund, delete, role change, admin-only op)
-           performed with no check of the caller's role/permission at all
-  CWE-841  A multi-step business workflow's required ordering is not enforced
-           (e.g. shipping/fulfilling before payment is confirmed)
-  CWE-915  Client-supplied fields merged wholesale into a stored record instead of only
-           the fields that are meant to be user-editable (mass assignment)
-  CWE-362  A business-state flag is read ("check"), then some work happens, then the
-           flag is written ("act") — a concurrent request can pass the check before
-           either write lands (e.g. a coupon/voucher redeemed twice)
+  CWE-89    SQL/NoSQL built by string concat or template literal interpolation
+  CWE-347   JWT or token accepted without signature verification (jwt.decode vs jwt.verify)
+  CWE-798   Hardcoded credentials, secrets, API keys, or static bypass codes
+  CWE-20    Security decision based on a client-supplied header (e.g. X-Forwarded-For for IP)
+  CWE-306   Security step skipped (e.g. current-password not verified before change)
+  CWE-208   Non-constant-time comparison of secrets (timing attack)
+  CWE-269   Role or privilege accepted directly from user-controlled input
+  CWE-639   Object/resource fetched or mutated by a client-supplied id with no check that
+            it belongs to the requesting user (IDOR / broken object-level authorization)
+  CWE-862   A privileged or sensitive action (refund, delete, role change, admin-only op)
+            performed with no check of the caller's role/permission at all
+  CWE-841   A multi-step business workflow's required ordering is not enforced
+            (e.g. shipping/fulfilling before payment is confirmed)
+  CWE-915   Client-supplied fields merged wholesale into a stored record instead of only
+            the fields that are meant to be user-editable (mass assignment)
+  CWE-362   A business-state flag is read ("check"), then some work happens, then the
+            flag is written ("act") — a concurrent request can pass the check before
+            either write lands (e.g. a coupon/voucher redeemed twice)
+  CWE-79    User-controlled input rendered into an HTML response in the wrong context
+            (e.g. HTML-encoded but placed inside a <script> or URL/attribute context) — XSS
+  CWE-95    User-controlled input passed to eval(), new Function(), vm.runInContext, or
+            similar dynamic code execution (eval/code injection)
+  CWE-1333  A regular expression with nested or overlapping quantifiers (e.g. `(a+)+`,
+            `([0-9]+)+`) applied to user-controlled input — catastrophic backtracking (ReDoS)
+  CWE-117   User-controlled input written to a log sink (console.log, a logger call) without
+            sanitizing newlines/control characters first — log injection / CRLF forging
+  CWE-521   A password/credential policy (regex or length/complexity check) that imposes
+            insufficient requirements (e.g. any length, no character-class requirement)
+  CWE-256   A password or credential stored or compared in plaintext instead of a salted
+            hash, or logged/returned in plaintext
   NOTE: CWE-290 is for relay/reflection spoofing attacks — do NOT use it for static bypass codes
         or hardcoded admin secrets; use CWE-798 instead.
 
 Severity rules — apply consistently for the same CWE:
-  high     CWE-89, CWE-347, CWE-798, CWE-639, CWE-862
-  medium   CWE-20, CWE-208, CWE-269, CWE-306, CWE-841, CWE-915, CWE-362
+  high     CWE-89, CWE-347, CWE-798, CWE-639, CWE-862, CWE-95, CWE-256
+  medium   CWE-20, CWE-208, CWE-269, CWE-306, CWE-841, CWE-915, CWE-362, CWE-79,
+           CWE-1333, CWE-117, CWE-521
   low      Informational / defence-in-depth only
   Deviate from these defaults ONLY when you can state a concrete amplifying or
-  mitigating factor (e.g. "no authentication required to reach this endpoint").
+  mitigating factor (e.g. "no authentication required to reach this endpoint",
+  or "this stores the credential itself, not just a one-time comparison of it").
 
 Business logic checklist — CWE-639/862/841/915/362 are NOT syntax patterns;
 they only show up by checking what the function does against what it SHOULD

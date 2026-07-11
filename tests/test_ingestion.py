@@ -135,6 +135,54 @@ class TestTreeSitterParser:
     def test_supported_languages_not_empty(self):
         assert len(self.parser.supported_languages) > 0
 
+    # ── nested-method masking (constructor/factory wrapper attribution fix) ──
+
+    NESTED_WRAPPER_JS = '''\
+var AllocationsDAO = function(db) {
+    this.getByUserIdAndThreshold = function(userId, threshold, callback) {
+        var searchCriteria = function() {
+            return { $where: "this.userId == " + userId + " && this.stocks > " + threshold };
+        };
+        var criteria = searchCriteria();
+        db.collection("allocations").find(criteria).toArray(callback);
+    };
+
+    this.update = function(userId, stocks, callback) {
+        db.collection("allocations").update({userId: userId}, {$set: stocks}, callback);
+    };
+};
+'''
+
+    def test_wrapper_body_masks_nested_method_source(self):
+        fns = self.parser.extract_functions(self.NESTED_WRAPPER_JS, "javascript")
+        by_name = {f.name: f for f in fns}
+
+        assert "AllocationsDAO" in by_name
+        wrapper_body = by_name["AllocationsDAO"].body
+        assert "$where" not in wrapper_body
+        assert "nested method 'this.getByUserIdAndThreshold' analyzed separately" in wrapper_body
+        assert "nested method 'this.update' analyzed separately" in wrapper_body
+
+    def test_nested_method_keeps_its_own_full_source(self):
+        fns = self.parser.extract_functions(self.NESTED_WRAPPER_JS, "javascript")
+        by_name = {f.name: f for f in fns}
+
+        assert "$where" in by_name["searchCriteria"].body
+        # the direct caller sees its own logic, but not the deeper nested builder's internals
+        caller_body = by_name["this.getByUserIdAndThreshold"].body
+        assert "searchCriteria()" in caller_body
+        assert "$where" not in caller_body
+        assert "nested method 'searchCriteria' analyzed separately" in caller_body
+
+    def test_masking_preserves_line_numbers(self):
+        fns = self.parser.extract_functions(self.NESTED_WRAPPER_JS, "javascript")
+        by_name = {f.name: f for f in fns}
+
+        wrapper = by_name["AllocationsDAO"]
+        assert wrapper.body.count("\n") == wrapper.end_line - wrapper.start_line
+        # sibling `this.update` (not itself nested-in-nested) is untouched by masking
+        assert "$set" in by_name["this.update"].body
+
 
 # ── extractor tests ───────────────────────────────────────────────────────────
 

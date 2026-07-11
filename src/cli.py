@@ -6,6 +6,7 @@ Commands:
   show       Pretty-print a saved results JSON file
   graph      Build and/or visualize a call graph
   patch      Generate + validate fixes for flagged functions in a completed run
+  evaluate   Score one or more analysis runs against a ground truth dataset
 
 Key flags:
   --react           Use ReAct agent loop (reason->act->observe) instead of single-pass
@@ -45,6 +46,7 @@ from src.llm.client import LLMClient
 from src.agent.react_loop import ReActAgent, MAX_STEPS
 from src.agent.tools import ToolSet
 from src.models import CodeSample
+from src.evaluation import evaluate_run, save_evaluation_report, comparison_table
 
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 
@@ -298,6 +300,10 @@ def _build_context_prompt(
         "    validation — validation belongs at the layer that first receives untrusted data.\n"
         "  - A config.X reference is NOT a hardcoded secret.\n"
         "  - A thin controller/handler that delegates to a service is clean unless it adds unsafe logic.\n"
+        "  - A comment of the exact form `/* --- nested method 'X' analyzed separately --- */`\n"
+        "    in place of a method body is expected and NOT obfuscated/suspicious code — X is a\n"
+        "    nested method (e.g. a constructor's `this.foo = function() {...}`) analyzed\n"
+        "    independently elsewhere. Do not flag the function containing this comment because of it.\n"
     )
     lines.append("=" * 60)
     lines.append(f"TARGET FUNCTION: {sample.function_name}")
@@ -703,6 +709,91 @@ def _write_patch_to_file(patch_record: dict) -> None:
 
     lines[start_line - 1:end_line] = patched_lines
     file_path.write_text("".join(lines), encoding="utf-8")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# evaluate — score analysis run(s) against a ground truth dataset
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command()
+def evaluate(
+    results: List[str] = typer.Option(
+        ..., "--results", "-r",
+        help="Path to a completed analysis run JSON. Pass more than once to "
+             "compare multiple runs (e.g. semantic vs agentic mode) side by side."
+    ),
+    ground_truth: str = typer.Option(
+        ..., "--ground-truth", "-g",
+        help="Path to a ground truth dataset JSON (experiments/ground_truth/*.json)."
+    ),
+    output_dir: str = typer.Option(
+        "experiments/results/evaluations", "--output-dir", "-o",
+        help="Directory to write per-run evaluation JSON reports into."
+    ),
+):
+    """
+    Match a completed analysis run's findings against a ground truth dataset and
+    compute precision/recall/F1, a per-CWE breakdown, and deduplicated
+    (vuln-level) recall. Read-only — never touches the analyzed project or the
+    run/ground-truth files.
+    """
+    gtp = Path(ground_truth)
+    if not gtp.exists():
+        typer.echo(f"Ground truth file not found: {gtp}", err=True)
+        raise typer.Exit(1)
+
+    reports_and_gt = []
+
+    for results_file in results:
+        rp = Path(results_file)
+        if not rp.exists():
+            typer.echo(f"Results file not found: {rp}", err=True)
+            raise typer.Exit(1)
+
+        report, gt = evaluate_run(rp, gtp)
+        reports_and_gt.append((report, gt))
+
+        out_path = save_evaluation_report(report, gt, output_folder=output_dir)
+
+        m = report.detection_metrics()
+        ur = report.unique_recall(gt)
+
+        typer.echo(f"\n{'-' * 60}")
+        typer.echo(f"Run       : {report.run_id}")
+        typer.echo(f"Mode      : {report.analysis_mode or '?'}")
+        typer.echo(f"Dataset   : {report.dataset}")
+        typer.echo(f"\nInstance-level detection (TP={m.tp} FP={m.fp} FN={m.fn} TN={m.tn}):")
+        typer.echo(f"  Precision : {m.precision:.3f}")
+        typer.echo(f"  Recall    : {m.recall:.3f}")
+        typer.echo(f"  F1        : {m.f1:.3f}")
+        typer.echo(f"  CWE accuracy (on TPs) : {report.cwe_accuracy():.3f}")
+        typer.echo(f"  Hallucination rate (on flagged) : {report.hallucination_rate():.3f}")
+        typer.echo(f"\nDeduplicated vulnerability recall: {ur['detected']}/{ur['planted']} ({ur['recall']:.3f})")
+
+        breakdown = report.cwe_breakdown(gt)
+        if breakdown:
+            typer.echo("\nPer-CWE breakdown (planted / detected / correct-CWE):")
+            for row in breakdown:
+                typer.echo(
+                    f"  {row['cwe_id']:<10} {row['planted']:>2} / {row['detected']:>2} / {row['cwe_correct']:>2}"
+                )
+
+        if report.unmatched_findings:
+            typer.echo(f"\nUnmatched findings ({len(report.unmatched_findings)}) — not in ground truth, unscored:")
+            for uf in report.unmatched_findings[:10]:
+                typer.echo(f"  {uf['function_name']} ({uf['file_path']})")
+
+        if report.unresolved_findings:
+            typer.echo(f"\nAmbiguous matches ({len(report.unresolved_findings)}) — file couldn't disambiguate:")
+            for rf in report.unresolved_findings[:10]:
+                typer.echo(f"  {rf['function_name']} expected {rf['expected_file']}")
+
+        typer.echo(f"\nEvaluation report saved -> {out_path}")
+
+    if len(reports_and_gt) > 1:
+        typer.echo(f"\n{'-' * 60}")
+        typer.echo("Comparison across runs:\n")
+        typer.echo(comparison_table(reports_and_gt))
 
 
 if __name__ == "__main__":
