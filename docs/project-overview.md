@@ -12,6 +12,18 @@ Static analysis tools (Bandit, ESLint, Semgrep) find pattern matches but lack se
 2. **Taint tracking** — automatically detect taint sources (HTTP handlers) and sinks (SQL/shell/eval calls) and expose the full source→sink path to the agent.
 3. **ReAct loop** — let the LLM actively query the graph before making a verdict, using tools like `get_taint_path` to trace injection flows.
 
+Beyond syntactic/data-flow CWEs (SQL injection, hardcoded secrets, missing
+signature verification, etc.), the agentic (`--react`) mode also detects
+**business-logic and authorization vulnerabilities** — broken object-level
+authorization / IDOR (CWE-639), missing function-level authorization
+(CWE-862), workflow-ordering bypass (CWE-841), mass assignment (CWE-915),
+and race conditions on business state (CWE-362). These are a distinct
+class: the code is syntactically fine but violates an application-level
+invariant, so catching them needs the multi-hop call-graph reasoning the
+ReAct loop was built for — the semantic single-pass mode does not attempt
+this class of bug. See `docs/business-logic.md` for the taxonomy and
+evaluation results.
+
 ## Supported Languages
 
 | Language | Extensions |

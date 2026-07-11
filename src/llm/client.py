@@ -137,15 +137,61 @@ CWE assignment rules — use the MOST SPECIFIC applicable CWE:
   CWE-306  Security step skipped (e.g. current-password not verified before change)
   CWE-208  Non-constant-time comparison of secrets (timing attack)
   CWE-269  Role or privilege accepted directly from user-controlled input
+  CWE-639  Object/resource fetched or mutated by a client-supplied id with no check that
+           it belongs to the requesting user (IDOR / broken object-level authorization)
+  CWE-862  A privileged or sensitive action (refund, delete, role change, admin-only op)
+           performed with no check of the caller's role/permission at all
+  CWE-841  A multi-step business workflow's required ordering is not enforced
+           (e.g. shipping/fulfilling before payment is confirmed)
+  CWE-915  Client-supplied fields merged wholesale into a stored record instead of only
+           the fields that are meant to be user-editable (mass assignment)
+  CWE-362  A business-state flag is read ("check"), then some work happens, then the
+           flag is written ("act") — a concurrent request can pass the check before
+           either write lands (e.g. a coupon/voucher redeemed twice)
   NOTE: CWE-290 is for relay/reflection spoofing attacks — do NOT use it for static bypass codes
         or hardcoded admin secrets; use CWE-798 instead.
 
 Severity rules — apply consistently for the same CWE:
-  high     CWE-89, CWE-347, CWE-798
-  medium   CWE-20, CWE-208, CWE-269, CWE-306
+  high     CWE-89, CWE-347, CWE-798, CWE-639, CWE-862
+  medium   CWE-20, CWE-208, CWE-269, CWE-306, CWE-841, CWE-915, CWE-362
   low      Informational / defence-in-depth only
   Deviate from these defaults ONLY when you can state a concrete amplifying or
   mitigating factor (e.g. "no authentication required to reach this endpoint").
+
+Business logic checklist — CWE-639/862/841/915/362 are NOT syntax patterns;
+they only show up by checking what the function does against what it SHOULD
+enforce. Use get_callers/get_source/get_node_info/get_taint_path (same tools
+as above) to check, for entry points and any function that reads or mutates
+a stored resource:
+  - Attribution rule (same principle as the SQL builder/executor rule above):
+    a low-level data-access function (a repository/DB wrapper that just looks
+    up or writes a record by the id/object its CALLER passed in — e.g.
+    findById, save, an ORM call) is NOT where CWE-639/862 belong. The
+    authorization decision is the CALLER's responsibility — the function that
+    decides WHICH id to fetch and WHETHER the requester may see/change it.
+    Use get_callers + get_source to find that decision point and flag it (or
+    its absence) there, not the storage accessor.
+  - Is an id/key used to fetch or update a resource ever compared against the
+    requesting user's own identity (e.g. `resource.userId === user.id`)? If
+    the id comes from the client and there is no such comparison anywhere in
+    this function or the path to it, that is CWE-639, not a clean read.
+  - Does this function perform a privileged action (refund, delete, ban,
+    change role/price) with NO check of the caller's role anywhere in it or
+    its callers? That is CWE-862. A comment saying "admin only" is not a
+    check — only code that reads and compares a role value counts.
+  - Does this function skip a required prior step of a workflow (e.g. marks
+    an order shipped/delivered without checking it was paid first)? That is
+    CWE-841.
+  - Does this function copy an entire client-supplied object/body into a
+    stored record (spread, `Object.assign`, `.update(req.body)`) instead of
+    picking only the fields a user should be allowed to set? That is CWE-915.
+  - Does this function check a "used"/"locked"/"redeemed" flag, then do work,
+    then set that flag afterwards — with no lock/transaction between the
+    check and the write? That is CWE-362.
+  Do NOT flag these speculatively. If the function already contains the
+  matching check (an explicit ownership, role, status, or flag comparison
+  before the sensitive action), it is clean — say so rather than guessing
+  that a check might be missing elsewhere.
 """
 
 _REACT_STATE_TEMPLATE = """\

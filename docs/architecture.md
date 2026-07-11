@@ -1,6 +1,6 @@
 # Architecture
 
-> **Current state: Sprint 3 complete.** Sprint 4 (Scale & Multi-Language) is next.
+> **Current state: Sprint 4 complete.** Sprint 5 (Scale & Multi-Language) is next.
 
 ---
 
@@ -320,6 +320,22 @@ from earlier verdicts without re-deriving them. `AgentState`
 a single function's analysis (used for debugging/introspection, not
 persisted).
 
+### Business Logic & Authorization Analysis (Sprint 4)
+
+The ReAct loop's whole reason for existing — letting the agent walk the call
+graph before answering — is what makes it possible to catch bugs that are
+invisible one function at a time: broken object-level authorization (IDOR),
+missing function-level authorization, workflow/state-ordering bypass, mass
+assignment, and race conditions on business state. Implemented as a
+prompt-only extension of `_REACT_SYSTEM` (new CWE table entries + a
+checklist), reusing the existing tools above — no new `ToolSet` methods, no
+`VulnerabilityReport` schema changes, and no change to the semantic
+(`call_graph_context`) mode, which isn't a good fit for this class of bug
+since it never gets a chance to check callers/callees before answering. See
+`docs/business-logic.md` for the full taxonomy, the caller/callee
+attribution rule, and the evaluation write-up (5/5 recall against a new
+`orders-service` ground truth dataset).
+
 ### `ToolSet`  (`src/agent/tools.py`)
 
 Tools available to the ReAct agent:
@@ -538,7 +554,8 @@ The idea (Sprint 2 already showed call graph context reduces false positives in 
 | No evaluation framework — no ground-truth precision/recall metrics tying findings *and* patches together | Backlog (unscheduled) |
 | Taint propagation is flag-based only — does not track individual variable flows | Backlog |
 | No multi-provider support — only OpenAI implemented | Backlog (unscheduled) |
-| Functions > `max_function_lines` (200) are silently skipped | Sprint 4 |
+| Business-logic detection (IDOR/CWE-639, missing function-level authz/CWE-862, workflow bypass/CWE-841, mass assignment/CWE-915, business-state race/CWE-362) has one known residual false-positive pattern — a privileged action reachable via a thin controller with no gate anywhere can get flagged on both the controller and the service function | See `docs/business-logic.md` |
+| Functions > `max_function_lines` (200) are silently skipped | Sprint 5 |
 | `patch --apply` replaces by line range — stale if the source file changed since the analysis run | Known risk, mitigated by the confirmation prompt |
 | Patch-apply success rate not yet measured against the reference dataset (needs a live-API run) | Sprint 3 follow-up, see `docs/patching.md` |
 | `PatchGenerator` has no visibility into config/data files or project files outside the call graph — a known gap surfaced by the reverted context-injection experiment | Open; needs a different context source than the call graph |

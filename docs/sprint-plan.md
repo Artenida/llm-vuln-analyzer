@@ -60,30 +60,106 @@ Build a production-grade LLM-powered security analysis tool that can scan a real
 
 ---
 
-## Sprint 4 — Scale & Multi-Language (NEXT)
+## Sprint 4 — Business Logic & Authorization Analysis (NEXT)
+
+**Goal:** Detect vulnerabilities that are invisible to syntactic/CWE-pattern
+analysis because the code is syntactically fine but violates an
+application-level invariant — who is allowed to touch which resource, in
+what order, with what data. This is the reason the ReAct loop and call
+graph exist: these bugs can only be caught by tracing a request across
+functions, not by reading one function in isolation.
+
+**Explicitly out of scope: the semantic single-pass mode
+(`call_graph_context`).** Business-logic bugs need the agent to actively
+check callers/callees/authorization state before making a call — a one-shot
+prompt has no way to verify that, so it would just add false positives
+without the ability to check them. This sprint only touches the agentic
+(`--react`) path.
+
+### Tasks
+
+#### 4.1 Business-logic CWE taxonomy + prompt rules
+Extend `_REACT_SYSTEM` in `src/llm/client.py` only — no new system prompt,
+no new response schema:
+- Add to the existing CWE assignment table: `CWE-639` (IDOR / broken object-level
+  authorization), `CWE-862` (missing function-level authorization), `CWE-841`
+  (improper enforcement of a behavioral workflow / step-ordering bypass),
+  `CWE-915` (mass assignment — client body merged directly into a model/update),
+  `CWE-362` (race condition on business state, e.g. double-redeem)
+- Add matching entries to the existing severity table
+- Add a short "business logic checklist" instructing the agent: for entry
+  points or state-mutating functions, check whether a resource/user
+  identifier used in a lookup or update is compared against the
+  authenticated caller (not merely present), whether a role/privilege value
+  is taken directly from client input, and whether a multi-step workflow's
+  ordering is enforced by checking callers
+
+#### 4.2 Reuse existing tools — no new ToolSet methods (by default)
+`get_callers`, `get_callees`, `get_source`, `get_node_info`, and
+`get_taint_path` already give the agent everything it needs to trace an
+identifier from a request into a data access or state change. Do not add a
+new tool up front — see 4.5 for the one case where it might be justified.
+
+#### 4.3 Business-logic ground truth
+A second small reference app (toy e-commerce or social-API style) with
+intentionally planted IDOR, mass-assignment, and workflow-bypass bugs,
+under `experiments/test_apps/`, with its own `ground_truth.json` —
+mirroring how `auth-service` grounds the injection-class CWEs. A separate
+dataset is needed because business-logic bugs are inherently more ambiguous
+(the "correct" behavior depends on domain intent, not just syntax), so
+false-positive rate has to be measured independently of the Sprint 1 results.
+
+#### 4.4 Evaluation run
+Run `--react` against the new app, compare against ground truth, and tune
+the 4.1 prompt rules based on the false positives/negatives observed —
+same process Sprint 1 used for the injection-class CWEs on `auth-service`.
+
+#### 4.5 Stretch — `get_authz_checks(function_name)` tool
+Only build this if 4.4 shows the agent can't reliably ground its answers
+(e.g. asserting "no ownership check" without evidence). It would be a
+deterministic regex scan (no LLM call) over a function's source for
+conditionals referencing user/owner/role/session identity comparisons,
+returned as evidence lines. Deferred by default to keep the sprint minimal.
+
+**Exit criteria:**
+- [x] `--react` flags IDOR / mass-assignment / workflow-bypass bugs in the new
+      reference app at a precision comparable to Sprint 1's injection-class results
+- [x] Semantic (`call_graph_context`) mode and `VulnerabilityReport` schema
+      are unchanged — all changes confined to `_REACT_SYSTEM`
+- [x] `docs/business-logic.md` written documenting the taxonomy, checklist,
+      and evaluation results
+
+**Status:** Complete — see `docs/business-logic.md` for the full taxonomy,
+attribution rule, and 3-round evaluation writeup against the new
+`orders-service` ground truth (5/5 recall, one documented residual
+false-positive pattern).
+
+---
+
+## Sprint 5 — Scale & Multi-Language
 
 **Goal:** Analyze real-world open-source repositories (hundreds to thousands of functions) without hitting API rate limits or cost ceilings.
 
 ### Tasks
 
-#### 4.1 Batch Analysis
+#### 5.1 Batch Analysis
 - Process functions in parallel batches (configurable concurrency)
 - Rate-limit aware: exponential backoff on 429s
 - Resume from last checkpoint if interrupted
 
-#### 4.2 Incremental / Cached Analysis
+#### 5.2 Incremental / Cached Analysis
 - Hash each function's code; skip re-analysis if hash matches a cached result
 - Only re-analyze functions that changed since last run (git-diff integration)
 
-#### 4.3 TypeScript Support
+#### 5.3 TypeScript Support
 - TypeScript is currently mapped to the JavaScript grammar — good for syntax but misses type annotations
 - Add `tree-sitter-typescript` grammar for richer type-aware context in prompts
 
-#### 4.4 Large-Function Handling
+#### 5.4 Large-Function Handling
 - Functions over `max_function_lines` (currently 200) are silently skipped
 - Instead: chunk them into overlapping windows and analyze each window; merge results
 
-#### 4.5 Filtering & Triage UI
+#### 5.5 Filtering & Triage UI
 - `show` command enhancements: filter by severity, CWE, file, function name
 - Export to SARIF format for GitHub Code Scanning / VS Code integration
 
@@ -102,6 +178,7 @@ Build a production-grade LLM-powered security analysis tool that can scan a real
 | False-positive feedback loop | Allow users to mark findings as FP; fine-tune prompts |
 | Go / Rust / Java support | Add tree-sitter grammars |
 | Inter-procedural analysis | Analyze chains of 3+ functions together |
+| `get_authz_checks` tool | Sprint 4.5 stretch goal — only if prompt-only approach can't ground its answers |
 
 ---
 
@@ -112,5 +189,6 @@ Build a production-grade LLM-powered security analysis tool that can scan a real
 | 1 | `docs/project-overview.md`, `docs/architecture.md`, `docs/sprint-plan.md` |
 | 2 | *(covered by updates to `docs/project-overview.md` — call graph visualization, taint tracking)* |
 | 3 | `docs/patching.md` — patch generation & validation approach |
-| 4 | `docs/scaling.md` — batch processing, caching, incremental analysis |
-| 4 | `docs/sarif-integration.md` — GitHub Code Scanning setup |
+| 4 | `docs/business-logic.md` — business-logic CWE taxonomy, checklist, evaluation results |
+| 5 | `docs/scaling.md` — batch processing, caching, incremental analysis |
+| 5 | `docs/sarif-integration.md` — GitHub Code Scanning setup |
