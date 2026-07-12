@@ -1,6 +1,6 @@
 """
 Ground truth dataset loading.
-Mirrors the schema used by experiments/ground_truth/*.json (see docs/evaluation.md).
+Mirrors the schema used by experiments/datasets/<name>/ground_truth.json (see docs/evaluation.md).
 """
 from __future__ import annotations
 

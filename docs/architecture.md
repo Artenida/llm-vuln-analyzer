@@ -142,7 +142,7 @@ of data and where it is persisted.
  └──────────┬──────────────────────────────────────────────────────┘
             │  save_patches()                                      [run_saver.py]
             ▼
-   experiments/results/patches/<run_id>_patches.json
+   experiments/datasets/<dataset>/patches/<run_id>_patches.json
    (unified_diff, patch_valid, patch_error, patched_code — per finding)
             │
             │  source project is UNTOUCHED up to this point
@@ -428,12 +428,12 @@ code embedded in the run JSON (the run JSON never stores function bodies).
 |-----------|-----------------|----------------|
 | `PatchGenerator.generate(code, explanation, cwe_id, ...)` | One LLM call → `PatchResult(unified_diff, error)` | No |
 | `PatchValidator.validate(original_code, unified_diff, language)` | Parses diff hunks, applies them to an in-memory copy (exact match, falling back to `difflib.SequenceMatcher` fuzzy matching for line drift), re-parses with tree-sitter, checks `tree.root_node.has_error` | No — works on strings only |
-| `save_patches()` | Writes `<run_id>_patches.json` | Yes — but only under `experiments/results/patches/`, never the analyzed project |
+| `save_patches()` | Writes `<run_id>_patches.json` | Yes — but only under `experiments/datasets/<dataset>/patches/`, never the analyzed project |
 | `_write_patch_to_file()` (`src/cli.py`) | Splices `patched_code` into `[start_line, end_line]` of the original file | **Yes — only when `--apply` is passed and the user confirms** |
 
 **Trust model:** `patch` without `--apply` is side-effect-free with respect
 to the analyzed project, by construction — the only disk write in that path
-is `save_patches()`, and it targets `experiments/results/patches/`. Writing
+is `save_patches()`, and it targets `experiments/datasets/<dataset>/patches/`. Writing
 to the analyzed project requires both the explicit `--apply` flag and an
 interactive confirmation (`--yes` opts out of the interactive prompt for
 scripted use, but the flag itself is still required).
@@ -486,36 +486,52 @@ unless a different one is passed.
 
 ## Experiment Layout  (`experiments/`)
 
+Everything a dataset needs — its ground truth, every run against it, and the
+patches/evaluations derived from those runs — lives together under
+`experiments/datasets/<name>/`, so understanding one test app never requires
+cross-referencing three separate top-level folders:
+
 ```
 experiments/
-├── configs/
+├── configs/                   ← shared across all datasets
 │   ├── default.yaml          ← standard o4-mini config
 │   ├── fast_scan.yaml        ← gpt-4o-mini baseline
 │   └── react_agent.yaml      ← ReAct with max_steps=8
 │
-├── runs/                      ← named experiment output (--run-name)
-│   └── <run-name>/
-│       ├── extraction.json
-│       ├── call_graph.json
-│       ├── call_graph.html
-│       ├── call_graph_annotated.html
-│       └── analysis.json
-│
-├── results/
-│   └── patches/               ← `patch` command output (Sprint 3)
-│       └── <run_id>_patches.json   — diffs + validity, never applied to source unless --apply
-│
-├── test_apps/                 ← reference codebases for experiments
-│   └── <app-name>/
-│       ├── src/
-│       └── ground_truth.json
-│
-├── scripts/                   ← PowerShell experiment runners
+├── scripts/                   ← shared PowerShell experiment runners
 │   ├── run_semantic.ps1
 │   ├── run_agentic.ps1
-│   └── run_all_modes.ps1
-└── archive/                   ← old timestamped result files (Sprint 1 runs)
+│   ├── run_all_modes.ps1
+│   └── visualize_run.ps1
+│
+├── results/
+│   └── context/
+│       └── edge_cache.json    ← shared LLM edge-resolution cache, keyed by
+│                                 full (caller, raw_call) path — not per-dataset
+│
+├── datasets/
+│   └── <dataset-name>/        ← e.g. auth-service, nodegoat, orders-service
+│       ├── ground_truth.json  ← `dataset` field matches the folder name
+│       ├── runs/               ← named experiment output (--dataset --run-name)
+│       │   └── <run-name>/
+│       │       ├── extraction.json
+│       │       ├── call_graph.json
+│       │       ├── call_graph.html
+│       │       ├── call_graph_annotated.html
+│       │       └── analysis.json
+│       ├── patches/            ← `patch` command output (Sprint 3)
+│       │   └── <run_id>_patches.json   — diffs + validity, never applied to source unless --apply
+│       └── evaluations/        ← `evaluate` command output (Sprint 5)
+│           └── eval_<run_id>.json
+│
+└── runs/                       ← fallback for ad-hoc named runs made without --dataset
+    └── <run-name>/
 ```
+
+A run only lands under `experiments/datasets/<name>/` when `analyze` is given
+both `--run-name` and `--dataset`; `patch`/`evaluate` then infer the dataset
+folder automatically from the `--results`/`--ground-truth` path, so nothing
+has to be repeated by hand.
 
 ---
 
@@ -534,7 +550,10 @@ Full inter-procedural taint tracking requires a dataflow engine (e.g. Joern). Th
 Sprint 1 experiments on the auth-service (24 functions) showed `o4-mini` produces ~40% fewer false positives on thin controllers and correctly attributes SQL injection to the query builder rather than the executor in all 14 runs. `gpt-4o-mini` is retained in `fast_scan.yaml` as a baseline for thesis comparison.
 
 **Why `--run-name` instead of timestamped files?**
-Named runs make thesis experiments reproducible and comparable. `experiments/runs/auth_agentic/analysis.json` is more meaningful than `analysis_o4_mini_20260518_180806.json`.
+Named runs make thesis experiments reproducible and comparable. `experiments/datasets/auth-service/runs/auth_agentic/analysis.json` is more meaningful than `analysis_o4_mini_20260518_180806.json`.
+
+**Why `experiments/datasets/<name>/` instead of splitting ground truth, runs, patches, and evaluations across separate top-level folders?**
+Everything needed to understand one test dataset — what bugs were planted, every run against it, and every scored/patched artifact derived from those runs — should be readable from one folder without cross-referencing three others. It also caught a real bug: a run named `auth-agentic` had actually scanned `billing-service` (mismatched `--run-name`), invisible under the old flat `experiments/runs/` layout but obvious once nesting by dataset forced the run to sit next to a `ground_truth.json` it didn't match.
 
 **Why is `patch` a separate command instead of a flag on `analyze`?**
 Patch generation is a second, independent LLM pass with its own cost and failure modes; decoupling it means re-patching (e.g. after tuning the patch prompt) never requires re-running the full vulnerability analysis. It also keeps the write-boundary explicit: `analyze` never writes to the analyzed project under any flag, and only `patch --apply` can.

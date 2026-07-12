@@ -50,6 +50,19 @@ from src.evaluation import evaluate_run, save_evaluation_report, comparison_tabl
 
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 
+
+def _infer_dataset_from_path(file_path: Path) -> Optional[str]:
+    """
+    Recovers the dataset name from a results file living under
+    experiments/datasets/<dataset>/runs/<run_name>/..., so patch/evaluate
+    outputs default to the same dataset folder without an extra flag.
+    """
+    parts = file_path.resolve().parts
+    for i, part in enumerate(parts):
+        if part == "datasets" and i + 1 < len(parts):
+            return parts[i + 1]
+    return None
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
@@ -89,7 +102,13 @@ def analyze(
     ),
     run_name: Optional[str] = typer.Option(
         None, "--run-name", "-n",
-        help="Named experiment run. Outputs go to experiments/runs/<name>/ with fixed filenames."
+        help="Named experiment run. Outputs go to experiments/datasets/<dataset>/runs/<name>/ "
+             "(or experiments/runs/<name>/ if --dataset is omitted) with fixed filenames."
+    ),
+    dataset: Optional[str] = typer.Option(
+        None, "--dataset", "-d",
+        help="Test dataset this run belongs to (e.g. nodegoat, auth-service) — matches "
+             "experiments/datasets/<dataset>/ground_truth.json. Only used together with --run-name."
     ),
 ):
     """Analyse source code for security vulnerabilities."""
@@ -100,9 +119,12 @@ def analyze(
 
     config = load_config(config_path)
 
-    # ── named run: redirect all outputs to experiments/runs/<name>/ ──────────
+    # ── named run: redirect all outputs to experiments/datasets/<dataset>/runs/<name>/ ──
     if run_name:
-        run_dir = f"experiments/runs/{run_name}"
+        run_dir = (
+            f"experiments/datasets/{dataset}/runs/{run_name}"
+            if dataset else f"experiments/runs/{run_name}"
+        )
         config.output.extraction_folder = run_dir
         config.output.context_folder    = run_dir
         config.output.analysis_folder   = run_dir
@@ -541,9 +563,11 @@ def patch(
         help="Source path override for re-extracting function bodies "
              "(defaults to the run's recorded source_path)."
     ),
-    output_dir: str = typer.Option(
-        "experiments/results/patches", "--output-dir", "-o",
-        help="Directory to write the patches JSON into."
+    output_dir: Optional[str] = typer.Option(
+        None, "--output-dir", "-o",
+        help="Directory to write the patches JSON into. Defaults to "
+             "experiments/datasets/<dataset>/patches/ when --results points into a "
+             "dataset run folder, else experiments/results/patches."
     ),
     config_path: Optional[str] = typer.Option(
         None, "--config", "-c", help="Path to YAML config file."
@@ -652,11 +676,16 @@ def patch(
             "patched_code": validation.patched_code,
         })
 
+    dataset = _infer_dataset_from_path(rp)
+    resolved_output_dir = output_dir or (
+        f"experiments/datasets/{dataset}/patches" if dataset else "experiments/results/patches"
+    )
+
     out_path = save_patches(
         patches=patches,
         run_id=run_id,
         source_path=source_path,
-        output_folder=output_dir,
+        output_folder=resolved_output_dir,
     )
 
     valid_count = sum(1 for p in patches if p["patch_valid"])
@@ -724,11 +753,12 @@ def evaluate(
     ),
     ground_truth: str = typer.Option(
         ..., "--ground-truth", "-g",
-        help="Path to a ground truth dataset JSON (experiments/ground_truth/*.json)."
+        help="Path to a ground truth dataset JSON (experiments/datasets/<name>/ground_truth.json)."
     ),
-    output_dir: str = typer.Option(
-        "experiments/results/evaluations", "--output-dir", "-o",
-        help="Directory to write per-run evaluation JSON reports into."
+    output_dir: Optional[str] = typer.Option(
+        None, "--output-dir", "-o",
+        help="Directory to write per-run evaluation JSON reports into. Defaults to "
+             "experiments/datasets/<dataset>/evaluations/, inferred from the ground truth file."
     ),
 ):
     """
@@ -753,7 +783,8 @@ def evaluate(
         report, gt = evaluate_run(rp, gtp)
         reports_and_gt.append((report, gt))
 
-        out_path = save_evaluation_report(report, gt, output_folder=output_dir)
+        resolved_output_dir = output_dir or f"experiments/datasets/{report.dataset}/evaluations"
+        out_path = save_evaluation_report(report, gt, output_folder=resolved_output_dir)
 
         m = report.detection_metrics()
         ur = report.unique_recall(gt)

@@ -8,8 +8,8 @@ run's `findings[]` next to a ground truth dataset and counting matches in prose
 couple of dozen functions and isn't reproducible: re-running the same run
 through the same counting exercise twice can silently drift. This sprint adds
 `src/evaluation/` and a CLI `evaluate` command that do that counting
-mechanically, against the existing `experiments/ground_truth/*.json` schema —
-no changes to the ground truth format, no changes to analysis/report schemas.
+mechanically, against the existing `experiments/datasets/<name>/ground_truth.json`
+schema — no changes to the ground truth format, no changes to analysis/report schemas.
 
 ## What it does
 
@@ -39,8 +39,10 @@ no changes to the ground truth format, no changes to analysis/report schemas.
    - **Hallucination rate on flagged findings** — of the TP+FP findings, what
      fraction also carried `hallucination_flag: true`.
 5. Saves a full per-instance JSON report to
-   `experiments/results/evaluations/eval_<run_id>.json` (never touches the
-   run file, the ground truth file, or the analyzed project).
+   `experiments/datasets/<dataset>/evaluations/eval_<run_id>.json` — dataset
+   inferred from the ground truth file's `dataset` field, overridable with
+   `--output-dir` (never touches the run file, the ground truth file, or the
+   analyzed project).
 6. If `--results` is passed more than once, prints a markdown comparison table
    across runs (e.g. semantic vs agentic mode, or gpt-4o-mini vs o4-mini) —
    precision/recall/F1/CWE-accuracy/unique-recall/hallucination-rate side by

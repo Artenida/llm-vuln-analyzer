@@ -19,7 +19,8 @@ analysis.json (completed run)
   PatchValidator.validate()  ── apply diff to an in-memory copy, re-parse with tree-sitter
         │
         ▼
-  experiments/results/patches/<run_id>_patches.json   (always written)
+  experiments/datasets/<dataset>/patches/<run_id>_patches.json   (always written;
+  dataset inferred from --results path, else experiments/results/patches/)
         │
         ▼ (only if --apply is passed)
   confirmation prompt → validated patches written into the actual source files
@@ -36,7 +37,7 @@ analysis.json (completed run)
 - **`VulnerabilityReport`** (`src/llm/client.py`) gained `unified_diff: str`, `patch_valid: Optional[bool]`, `patch_error: Optional[str]` — populated by the `patch` command, not by `analyze`.
 
 - **CLI `patch` command** (`src/cli.py`)
-  Takes a completed run JSON (`--results`), re-extracts the flagged functions' source from `source_path` (or `--path` override), generates + validates a patch per finding, and saves everything to `experiments/results/patches/<run_id>_patches.json` by default — **the analyzed project is untouched**.
+  Takes a completed run JSON (`--results`), re-extracts the flagged functions' source from `source_path` (or `--path` override), generates + validates a patch per finding, and saves everything to `experiments/datasets/<dataset>/patches/<run_id>_patches.json` by default (dataset inferred from the `--results` path; falls back to `experiments/results/patches/` when it isn't under `experiments/datasets/`) — **the analyzed project is untouched**.
 
 ## The `--apply` flag (opt-in only)
 

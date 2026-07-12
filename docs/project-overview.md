@@ -69,13 +69,16 @@ python -m src.cli analyze --path path/to/project --react
 # Inline snippet
 python -m src.cli analyze --snippet "def login(u,p): db.execute('SELECT...' + u)" --language python
 
-# ── Named experiments (saves to experiments/runs/<name>/) ──────────────────
-python -m src.cli analyze --path path/to/app --run-name auth_semantic
-python -m src.cli analyze --path path/to/app --react --run-name auth_agentic
+# ── Named experiments (saves to experiments/datasets/<dataset>/runs/<name>/) ─
+python -m src.cli analyze --path path/to/app --dataset auth-service --run-name auth_semantic
+python -m src.cli analyze --path path/to/app --react --dataset auth-service --run-name auth_agentic
+
+# ── Without --dataset, outputs fall back to experiments/runs/<name>/ ───────
+python -m src.cli analyze --path path/to/app --run-name quick_check
 
 # ── With visualization ─────────────────────────────────────────────────────
 # Generates call_graph.html + call_graph_annotated.html (with findings overlaid)
-python -m src.cli analyze --path path/to/app --react --visualize --run-name auth_agentic
+python -m src.cli analyze --path path/to/app --react --visualize --dataset auth-service --run-name auth_agentic
 
 # ── With custom config (model / steps / line limit) ────────────────────────
 python -m src.cli analyze --path path/to/app --react --config experiments/configs/react_agent.yaml
@@ -93,7 +96,8 @@ python -m src.cli analyze --path path/to/app --build-context --dry-run
 | `--language / -l` | Language for snippet: `python`, `javascript`, `c`, `cpp` |
 | `--react` | Use ReAct agent loop instead of single-pass semantic |
 | `--visualize / -v` | Export interactive HTML + DOT call graph |
-| `--run-name / -n` | Named experiment → outputs go to `experiments/runs/<name>/` |
+| `--run-name / -n` | Named experiment → outputs go to `experiments/datasets/<dataset>/runs/<name>/` (or `experiments/runs/<name>/` without `--dataset`) |
+| `--dataset / -d` | Test dataset this run belongs to (e.g. `nodegoat`, `auth-service`) — only used together with `--run-name` |
 | `--config / -c` | Path to YAML config file |
 | `--dry-run` | Build call graph only, skip LLM calls |
 
@@ -109,11 +113,11 @@ python -m src.cli graph --path path/to/project
 python -m src.cli graph --path path/to/project --dot
 
 # Visualize a previously saved call graph (no re-build)
-python -m src.cli graph --graph-file experiments/runs/auth_agentic/call_graph.json
+python -m src.cli graph --graph-file experiments/datasets/auth-service/runs/auth_agentic/call_graph.json
 
 # Overlay vulnerability findings from an analysis run
-python -m src.cli graph --graph-file experiments/runs/auth_agentic/call_graph.json \
-                        --results    experiments/runs/auth_agentic/analysis.json
+python -m src.cli graph --graph-file experiments/datasets/auth-service/runs/auth_agentic/call_graph.json \
+                        --results    experiments/datasets/auth-service/runs/auth_agentic/analysis.json
 
 # Custom output directory
 python -m src.cli graph --path path/to/project --output-dir experiments/runs/my_graph
@@ -127,10 +131,12 @@ See [`docs/patching.md`](patching.md) for the full design. Quick reference:
 
 ```powershell
 # Generate + validate patches (default: JSON artifact only, source untouched)
-python -m src.cli patch --results experiments/runs/auth_agentic/analysis.json
+# --results pointing into experiments/datasets/<dataset>/runs/... auto-saves patches
+# to experiments/datasets/<dataset>/patches/
+python -m src.cli patch --results experiments/datasets/auth-service/runs/auth_agentic/analysis.json
 
 # Opt-in: write validated patches into the actual source files (prompts for confirmation)
-python -m src.cli patch --results experiments/runs/auth_agentic/analysis.json --apply
+python -m src.cli patch --results experiments/datasets/auth-service/runs/auth_agentic/analysis.json --apply
 ```
 
 ---
@@ -141,20 +147,21 @@ See [`docs/evaluation.md`](evaluation.md) for the full design. Quick reference:
 
 ```powershell
 # Score one run against a ground truth dataset
-python -m src.cli evaluate --results experiments/runs/auth_agentic/analysis.json \
-                            --ground-truth experiments/ground_truth/auth-service.json
+python -m src.cli evaluate --results experiments/datasets/auth-service/runs/auth_agentic/analysis.json \
+                            --ground-truth experiments/datasets/auth-service/ground_truth.json
 
 # Compare two runs (e.g. semantic vs agentic, or two models) against the same dataset
-python -m src.cli evaluate --results experiments/runs/auth_semantic/analysis.json \
-                            --results experiments/runs/auth_agentic/analysis.json \
-                            --ground-truth experiments/ground_truth/auth-service.json
+python -m src.cli evaluate --results experiments/datasets/auth-service/runs/auth_semantic/analysis.json \
+                            --results experiments/datasets/auth-service/runs/auth_agentic/analysis.json \
+                            --ground-truth experiments/datasets/auth-service/ground_truth.json
 ```
 
 Computes precision/recall/F1, CWE accuracy on true positives, deduplicated
 (`duplicate_of`-aware) unique-vulnerability recall, a per-CWE breakdown, and
 hallucination rate on flagged findings. Saves
-`experiments/results/evaluations/eval_<run_id>.json` per run — read-only,
-never touches the run file, ground truth file, or analyzed project.
+`experiments/datasets/<dataset>/evaluations/eval_<run_id>.json` per run
+(dataset inferred from the ground truth file) — read-only, never touches the
+run file, ground truth file, or analyzed project.
 
 ---
 
@@ -162,10 +169,10 @@ never touches the run file, ground truth file, or analyzed project.
 
 ```powershell
 # Full report
-python -m src.cli show experiments/runs/auth_agentic/analysis.json
+python -m src.cli show experiments/datasets/auth-service/runs/auth_agentic/analysis.json
 
 # Only show functions with vulnerabilities
-python -m src.cli show experiments/runs/auth_agentic/analysis.json --vulns-only
+python -m src.cli show experiments/datasets/auth-service/runs/auth_agentic/analysis.json --vulns-only
 ```
 
 ---
@@ -177,7 +184,7 @@ After any run with `--visualize`, or after `graph`, the HTML file is a **self-co
 **Open it:**
 ```powershell
 # Windows — opens in your default browser
-Start-Process experiments/runs/auth_agentic/call_graph.html
+Start-Process experiments/datasets/auth-service/runs/auth_agentic/call_graph.html
 
 # Or just double-click the file in Explorer
 # Or drag it into any browser window
@@ -205,7 +212,9 @@ Start-Process experiments/runs/auth_agentic/call_graph.html
 
 ## Output Files
 
-For a named run `--run-name auth_agentic` all files land in `experiments/runs/auth_agentic/`:
+For a named run `--dataset auth-service --run-name auth_agentic` all files land in
+`experiments/datasets/auth-service/runs/auth_agentic/` (or `experiments/runs/auth_agentic/`
+if `--dataset` is omitted):
 
 | File | Description |
 |------|-------------|
@@ -281,4 +290,5 @@ Copy `.env.example` to `.env` and fill in your key.
 - `o4-mini` + call graph context — significantly fewer false positives
 - `o4-mini` + ReAct loop — best accuracy; correctly attributes SQL injection to `findByUsername` (the query builder) not `execute` (the runner)
 
-All Sprint 2+ experiments use named runs under `experiments/runs/`.
+All Sprint 2+ experiments use named runs, organized per dataset under
+`experiments/datasets/<dataset>/runs/` (see `experiments/README.md`).

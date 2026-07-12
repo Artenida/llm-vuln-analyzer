@@ -1,10 +1,10 @@
 """
 Automated evaluation harness.
 
-Matches a completed analysis run (experiments/runs/*/analysis.json) against a
-ground truth dataset (experiments/ground_truth/*.json) and computes precision/
-recall/F1 — replacing the manual counting done by hand in docs/business-logic.md
-and the Sprint 1 writeups.
+Matches a completed analysis run (experiments/datasets/<name>/runs/*/analysis.json)
+against a ground truth dataset (experiments/datasets/<name>/ground_truth.json) and
+computes precision/recall/F1 — replacing the manual counting done by hand in
+docs/business-logic.md and the Sprint 1 writeups.
 
 Two matching granularities, because a ground truth dataset may plant the same
 logical bug in more than one file (see auth-service's rateLimiter duplicate):
