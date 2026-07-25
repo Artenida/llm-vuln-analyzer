@@ -4,6 +4,7 @@ Supports DOT (Graphviz) and interactive HTML (pyvis/vis.js).
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -42,10 +43,103 @@ _ROLE_COLOURS = {
 # HTML (pyvis)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _finding_node_ids(findings: list[dict] | None) -> set:
+    """Node ids of everything a run flagged as vulnerable."""
+    ids = set()
+    for f in findings or []:
+        if f.get("vulnerability_found"):
+            ids.add(f"{f.get('file_path', '')}::{f.get('function_name', '')}")
+    return ids
+
+
+def _neighbourhood(graph: dict, seeds: set, hops: int) -> set:
+    """Seeds plus everything within `hops` call-graph steps, in either
+    direction — a vulnerable function's callers matter as much as its callees
+    when the question is how user input reaches it."""
+    keep = {s for s in seeds if s in graph}
+    frontier = set(keep)
+
+    for _ in range(max(0, hops)):
+        nxt = set()
+        for node_id in frontier:
+            node = graph.get(node_id, {})
+            for nb in list(node.get("callees", [])) + list(node.get("callers", [])):
+                if nb in graph and nb not in keep and not nb.startswith("external::"):
+                    nxt.add(nb)
+        if not nxt:
+            break
+        keep |= nxt
+        frontier = nxt
+
+    return keep
+
+
+def select_subgraph(
+    graph: dict,
+    findings: list[dict] | None = None,
+    focus: str | None = None,
+    hops: int = 1,
+    only_findings: bool = False,
+    hide_isolated: bool = False,
+) -> dict:
+    """Cuts a large call graph down to something a person can actually read.
+
+    A few-hundred-function repository renders as an undifferentiated hairball:
+    every node is drawn, every label overlaps, and nothing is legible. The
+    honest fix is to draw less, not to restyle the same mess — so this returns
+    the sub-graph worth looking at, with each kept node's callers/callees
+    pruned to the kept set so no edge dangles.
+
+    focus         - keep only this function (matched on name or file::name)
+                    and its neighbourhood
+    only_findings - keep only flagged functions and their neighbourhood
+    hops          - how far to expand around those seeds (0 = seeds alone)
+    hide_isolated - drop nodes with no remaining edges
+    """
+    internal = {k: v for k, v in graph.items() if not v.get("is_external")}
+
+    seeds: set | None = None
+    if focus:
+        seeds = {
+            node_id for node_id, node in internal.items()
+            if node_id == focus or node.get("function_name") == focus
+        }
+        if not seeds:
+            raise ValueError(
+                f"No function matching {focus!r} in this graph. Pass a function name "
+                "as it appears in the run, or 'file/path.ts::functionName'."
+            )
+    elif only_findings:
+        seeds = _finding_node_ids(findings) & set(internal)
+        if not seeds:
+            raise ValueError(
+                "No flagged functions to focus on — pass --results with a run that "
+                "found something, or drop --only-findings."
+            )
+
+    keep = _neighbourhood(internal, seeds, hops) if seeds is not None else set(internal)
+
+    out: dict = {}
+    for node_id in keep:
+        node = dict(internal[node_id])
+        node["callees"] = [c for c in node.get("callees", []) if c in keep]
+        node["callers"] = [c for c in node.get("callers", []) if c in keep]
+        out[node_id] = node
+
+    if hide_isolated:
+        out = {
+            k: v for k, v in out.items()
+            if v["callees"] or v["callers"] or k in (seeds or set())
+        }
+
+    return out
+
+
 def export_html(
     graph: dict,
     output_path: str | Path,
     findings: list[dict] | None = None,
+    label_mode: str = "auto",
 ) -> Path:
     """
     Exports an interactive HTML call graph using pyvis/vis.js.
@@ -95,40 +189,66 @@ def export_html(
         font_color="#e0e0e0",
         notebook=False,
     )
-    net.set_options("""
-    {
-      "nodes": {
-        "borderWidth": 2,
-        "borderWidthSelected": 4,
-        "font": { "size": 13, "face": "monospace" },
-        "shape": "box"
-      },
-      "edges": {
-        "arrows": { "to": { "enabled": true, "scaleFactor": 0.7 } },
-        "color": { "color": "#555577", "highlight": "#aaaaff" },
-        "smooth": { "type": "cubicBezier", "forceDirection": "horizontal" }
-      },
-      "layout": {
-        "hierarchical": {
-          "enabled": false
-        }
-      },
-      "physics": {
-        "stabilization": { "iterations": 200 },
-        "barnesHut": {
-          "gravitationalConstant": -8000,
-          "centralGravity": 0.3,
-          "springLength": 120
-        }
-      },
-      "interaction": {
-        "hover": true,
-        "tooltipDelay": 150,
-        "navigationButtons": true,
-        "keyboard": true
-      }
-    }
-    """)
+    # Settings that work for 30 nodes actively harm 1000: curved edges turn
+    # into visual mush, every label overlaps, and the layout never settles.
+    # Scale the rendering to the graph actually being drawn.
+    n_nodes = sum(1 for v in graph.values() if not v.get("is_external"))
+    large = n_nodes > 150
+
+    net.set_options(json.dumps({
+        "nodes": {
+            "borderWidth": 2,
+            "borderWidthSelected": 4,
+            "font": {"size": 13, "face": "monospace", "strokeWidth": 3,
+                     "strokeColor": "#1a1a2e"},
+            "shape": "dot" if large else "box",
+            "scaling": {"min": 8, "max": 40},
+        },
+        "edges": {
+            "arrows": {"to": {"enabled": True, "scaleFactor": 0.5 if large else 0.7}},
+            "color": {"color": "#4a4a6a" if large else "#555577",
+                      "highlight": "#aaaaff", "opacity": 0.5 if large else 0.9},
+            # Straight edges on a big graph: curves overlap into noise and cost
+            # a great deal of layout time for no readability gain.
+            "smooth": False if large else {"type": "cubicBezier",
+                                           "forceDirection": "horizontal"},
+            "width": 0.5 if large else 1,
+        },
+        "layout": {
+            "hierarchical": {"enabled": False},
+            # vis.js's "improved" layout is O(n^2)-ish and stalls on big graphs.
+            "improvedLayout": not large,
+        },
+        "physics": {
+            "stabilization": {"iterations": 400 if large else 200,
+                              "updateInterval": 25},
+            # forceAtlas2 separates clusters far better than barnesHut at scale.
+            "solver": "forceAtlas2Based" if large else "barnesHut",
+            "forceAtlas2Based": {
+                "gravitationalConstant": -120,
+                "centralGravity": 0.005,
+                "springLength": 220,
+                "springConstant": 0.05,
+                "damping": 0.6,
+                "avoidOverlap": 0.6,
+            },
+            "barnesHut": {
+                "gravitationalConstant": -8000,
+                "centralGravity": 0.3,
+                "springLength": 120,
+            },
+            # Freeze once settled — a graph that never stops drifting cannot be
+            # read, and cannot be screenshotted for a thesis figure.
+            "adaptiveTimestep": True,
+        },
+        "interaction": {
+            "hover": True,
+            "tooltipDelay": 150,
+            "navigationButtons": True,
+            "keyboard": True,
+            "multiselect": True,
+        },
+    }))
 
     # ── add nodes ─────────────────────────────────────────────────────────────
     internal_node_ids: set[str] = set()
@@ -175,10 +295,32 @@ def export_html(
         callees_count = len(node.get("callees", []))
         tooltip += f"<br>callers: {callers_count} | callees: {callees_count}"
 
+        # Labelling every node is what makes a big graph unreadable — the text
+        # collides long before the nodes do. Above the threshold only the nodes
+        # you are actually looking for keep a permanent label; the rest carry
+        # the same information on hover.
+        important = (
+            node_id in vuln_nodes
+            or node.get("is_entry_point")
+            or node.get("is_taint_sink")
+            or (callers_count + callees_count) >= 8
+        )
+        if label_mode == "none":
+            show_label = False
+        elif label_mode == "important":
+            show_label = important
+        elif label_mode == "all":
+            show_label = True
+        else:                                    # auto
+            show_label = important if large else True
+
         net.add_node(
             node_id,
-            label=label,
+            label=label if show_label else " ",
             title=tooltip,
+            # Size by connectedness so hubs read as hubs instead of every node
+            # looking equally significant.
+            value=1 + callers_count + callees_count,
             color={
                 "background": color,
                 "border":     "#ffffff",

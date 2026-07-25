@@ -61,7 +61,7 @@ from src.results import save_extraction_results, save_run, save_call_graph, save
 from src.results.checkpoint import CheckpointHeader, CheckpointMismatch, RunCheckpoint
 from src.results.patch_generator import PatchGenerator
 from src.results.patch_validator import PatchValidator
-from src.results.export_graph import export_dot, export_html
+from src.results.export_graph import export_dot, export_html, select_subgraph
 from src.results.save_graph import load_call_graph
 from src.context.call_graph import nodes_to_dict
 from src.llm.client import LLMClient
@@ -685,6 +685,32 @@ def graph(
     ),
     html: bool = typer.Option(True,  "--html/--no-html", help="Emit interactive HTML graph."),
     dot:  bool = typer.Option(False, "--dot",            help="Also emit a Graphviz DOT file."),
+    only_findings: bool = typer.Option(
+        False, "--only-findings",
+        help="Draw only flagged functions and their neighbours instead of the whole "
+             "graph. Requires --results. On a few-hundred-function repo this is the "
+             "difference between a readable figure and a hairball."
+    ),
+    focus: Optional[str] = typer.Option(
+        None, "--focus",
+        help="Draw only this function and its neighbours. Accepts a bare function "
+             "name or 'path/to/file.ts::functionName'."
+    ),
+    hops: int = typer.Option(
+        1, "--hops",
+        help="How far to expand around --focus/--only-findings seeds, following "
+             "callers and callees. 0 = seeds only."
+    ),
+    hide_isolated: bool = typer.Option(
+        False, "--hide-isolated",
+        help="Drop nodes left with no edges — usually noise in a call graph view."
+    ),
+    labels: str = typer.Option(
+        "auto", "--labels",
+        help="Permanent node labels: auto (all when small, only findings/entry "
+             "points/hubs when large) | all | important | none. Hidden labels are "
+             "still shown on hover."
+    ),
     config_path: Optional[str] = typer.Option(
         None, "--config", "-c", help="Path to YAML config file."
     ),
@@ -770,15 +796,37 @@ def graph(
             f"  External refs: {stats['external_nodes']}"
         )
 
-    # ── export ────────────────────────────────────────────────────────────────
+    # ── narrow the graph down to something readable ───────────────────────────
     out_dir = Path(output_dir)
 
+    if only_findings or focus or hide_isolated:
+        before = sum(1 for v in plain.values() if not v.get("is_external"))
+        try:
+            plain = select_subgraph(
+                plain,
+                findings=findings_dicts,
+                focus=focus,
+                hops=hops,
+                only_findings=only_findings,
+                hide_isolated=hide_isolated,
+            )
+        except ValueError as e:
+            typer.echo(f"\n{e}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"Focused view: {len(plain)} of {before} node(s) drawn.")
+
+    if labels not in ("auto", "all", "important", "none"):
+        typer.echo(f"Unknown --labels {labels!r}: use auto, all, important or none.", err=True)
+        raise typer.Exit(1)
+
+    # ── export ────────────────────────────────────────────────────────────────
     if html:
         html_name = "call_graph_annotated.html" if findings_dicts else "call_graph.html"
         html_out = export_html(
             plain,
             out_dir / html_name,
             findings=findings_dicts or None,
+            label_mode=labels,
         )
         typer.echo(f"HTML graph → {html_out}")
         typer.echo("  Open in a browser to explore interactively.")
