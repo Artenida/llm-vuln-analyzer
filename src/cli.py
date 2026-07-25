@@ -70,7 +70,7 @@ from src.llm.pricing import TokenUsage, estimate_cost
 from src.agent.react_loop import ReActAgent, MAX_STEPS
 from src.agent.tools import ToolSet
 from src.models import CodeSample
-from src.evaluation import evaluate_run, save_evaluation_report, comparison_table, load_ground_truth
+from src.evaluation import evaluate_run, save_evaluation_report, save_comparison_report, comparison_table, load_ground_truth
 from src.evaluation.bootstrap import build_ground_truth, save_ground_truth_skeleton
 
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
@@ -1164,6 +1164,10 @@ def evaluate(
         typer.echo(f"\n{'-' * 60}")
         typer.echo("Comparison across runs:\n")
         typer.echo(comparison_table(reports_and_gt))
+
+        comparison_dir = output_dir or f"experiments/datasets/{reports_and_gt[0][0].dataset}/evaluations"
+        cmp_path = save_comparison_report(reports_and_gt, output_folder=comparison_dir)
+        typer.echo(f"\nComparison saved -> {cmp_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

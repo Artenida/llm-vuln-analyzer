@@ -9,6 +9,7 @@ from src.evaluation.evaluator import (
     ConfusionMetrics,
     evaluate_run,
     save_evaluation_report,
+    save_comparison_report,
     comparison_table,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "ConfusionMetrics",
     "evaluate_run",
     "save_evaluation_report",
+    "save_comparison_report",
     "comparison_table",
 ]

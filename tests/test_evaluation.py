@@ -12,7 +12,10 @@ from pathlib import Path
 # allow imports from project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.evaluation import evaluate_run, load_ground_truth, save_evaluation_report, comparison_table
+from src.evaluation import (
+    evaluate_run, load_ground_truth, save_evaluation_report,
+    save_comparison_report, comparison_table,
+)
 
 
 def _write(tmp_path, name, payload):
@@ -229,3 +232,49 @@ def test_comparison_table_lists_all_runs(tmp_path):
     assert "run_b" in table
     assert "call_graph_context" in table
     assert "react_loop" in table
+
+
+def test_save_comparison_report_writes_markdown_with_every_run(tmp_path):
+    """The per-run JSON was always saved; the cross-run comparison — the one
+    output putting accuracy and cost per mode on the same row — was printed and
+    then lost with the terminal scrollback."""
+    gt_path = _write(tmp_path, "gt.json", GT_PAYLOAD)
+    run_a = _write(tmp_path, "run_a.json", {
+        "run_id": "run_a", "model": "m1", "source_path": "x",
+        "summary": {"total_cost_usd": 0.25, "total_tokens": 1000},
+        "findings": [_finding("login", "controllers/auth.js", True, "CWE-89", analysis_mode="call_graph_context")],
+    })
+    run_b = _write(tmp_path, "run_b.json", {
+        "run_id": "run_b", "model": "m2", "source_path": "x",
+        "summary": {"total_cost_usd": 0.75, "total_tokens": 3000},
+        "findings": [_finding("login", "controllers/auth.js", True, "CWE-89", analysis_mode="react_loop")],
+    })
+
+    reports = [evaluate_run(run_a, gt_path), evaluate_run(run_b, gt_path)]
+    out = save_comparison_report(reports, output_folder=str(tmp_path))
+    body = out.read_text(encoding="utf-8")
+
+    assert out.exists() and out.suffix == ".md"
+    assert "run_a" in body and "run_b" in body
+    assert "call_graph_context" in body and "react_loop" in body
+    assert "$0.2500" in body and "$0.7500" in body      # cost travels with the table
+    assert "Precision" in body
+
+
+def test_saved_comparison_carries_the_uncurated_warning(tmp_path):
+    """A saved table outlives the terminal warning printed beside it, so the
+    caveat has to live inside the artifact or it reads as a valid result."""
+    payload = dict(GT_PAYLOAD)
+    payload["curation_status"] = {"reviewed": False, "functions_unreviewed": 7,
+                                  "functions_prefilled_vulnerable": 2}
+    gt_path = _write(tmp_path, "gt_uncurated.json", payload)
+    run_a = _write(tmp_path, "run_a.json", {
+        "run_id": "run_a", "model": "m1", "source_path": "x",
+        "findings": [_finding("login", "controllers/auth.js", True, "CWE-89")],
+    })
+
+    reports = [evaluate_run(run_a, gt_path)]
+    body = save_comparison_report(reports, output_folder=str(tmp_path)).read_text(encoding="utf-8")
+
+    assert "not valid" in body.lower()
+    assert "7" in body

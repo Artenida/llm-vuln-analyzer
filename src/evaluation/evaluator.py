@@ -385,6 +385,64 @@ def save_evaluation_report(
     return out_path
 
 
+def save_comparison_report(
+    reports_and_gt: list,
+    output_folder: str = "experiments/results/evaluations",
+    filename: Optional[str] = None,
+) -> Path:
+    """Persists the cross-run comparison alongside the per-run reports.
+
+    The per-run JSON was already saved; the comparison table was not — it was
+    printed once and lost with the terminal scrollback. It is also the single
+    output that answers the question the whole mode split exists to answer
+    (accuracy and cost, per mode, on one row), so it is the last thing that
+    should be ephemeral.
+
+    Written as markdown because that is the form it gets quoted in.
+    """
+    folder = Path(output_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = folder / (filename or f"comparison_{stamp}.md")
+
+    dataset = reports_and_gt[0][0].dataset if reports_and_gt else "?"
+    gt = reports_and_gt[0][1] if reports_and_gt else None
+
+    lines = [
+        f"# Run comparison — {dataset}",
+        "",
+        f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+        "",
+    ]
+
+    # A saved table outlives the terminal warning that was printed next to it,
+    # so the caveat has to travel with the file or it will be read as a result.
+    if gt is not None and gt.needs_curation:
+        cs = gt.curation_status
+        lines += [
+            "> **These numbers are not valid.** The ground truth is an uncurated "
+            f"skeleton (`curation_status.reviewed` is false): "
+            f"{cs.get('functions_unreviewed', '?')} row(s) default to clean and "
+            f"{cs.get('functions_prefilled_vulnerable', '?')} are unconfirmed. "
+            "Curate it and re-run before quoting anything here.",
+            "",
+        ]
+
+    lines += ["## Runs compared", ""]
+    for report, _ in reports_and_gt:
+        cost = f"${report.total_cost_usd:.4f}" if report.total_cost_usd is not None else "n/a"
+        lines.append(
+            f"- `{report.run_id}` — mode: {report.analysis_mode or '?'}, "
+            f"model: {report.model or '?'}, cost: {cost}"
+        )
+
+    lines += ["", "## Results", "", comparison_table(reports_and_gt), ""]
+
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    logger.info("Comparison report saved -> %s", out_path)
+    return out_path
+
+
 def comparison_table(reports_and_gt: list) -> str:
     """Markdown table comparing multiple runs (e.g. semantic vs agentic mode) against
     ground truth. `reports_and_gt` is a list of (EvaluationReport, GroundTruthDataset)."""
