@@ -7,12 +7,19 @@ Commands:
   graph      Build and/or visualize a call graph
   patch      Generate + validate fixes for flagged functions in a completed run
   evaluate   Score one or more analysis runs against a ground truth dataset
+  cost       Show LLM spend from the persistent cost ledger (all-time or per-run)
 
 Key flags:
   --react           Use ReAct agent loop (reason->act->observe) instead of single-pass
   --dry-run         Extract + build graph only, no LLM calls
+  --api-key-alias   Select a named API key (OPENAI_API_KEY_<ALIAS>) for setups with
+                    more than one key for the same provider; on analyze/graph/patch
   patch --apply     Opt-in: write validated patches into the actual source files
                     (default `patch` behavior only saves a reviewable JSON artifact)
+
+Every real LLM call (edge resolution, analysis, patch generation) is recorded to a
+persistent SQLite ledger (experiments/cost_ledger.db) in addition to each run's own
+JSON — run `cost` for cross-run/cross-phase/cross-key totals.
 
 Analysis always builds the call graph and injects context into the prompt.
 Use --react to switch from single-pass semantic to the agentic ReAct loop.
@@ -36,13 +43,15 @@ import typer
 from src.config import load_config
 from src.context.call_graph import CallGraphBuilder
 from src.ingestion.extractor import CodeExtractor
-from src.results import save_extraction_results, save_run, save_call_graph, save_patches
+from src.results import save_extraction_results, save_run, save_call_graph, save_patches, make_run_id
 from src.results.patch_generator import PatchGenerator
 from src.results.patch_validator import PatchValidator
 from src.results.export_graph import export_dot, export_html
 from src.results.save_graph import load_call_graph
 from src.context.call_graph import nodes_to_dict
 from src.llm.client import LLMClient
+from src.llm.cost_ledger import CostLedger
+from src.llm.pricing import TokenUsage, estimate_cost
 from src.agent.react_loop import ReActAgent, MAX_STEPS
 from src.agent.tools import ToolSet
 from src.models import CodeSample
@@ -110,6 +119,13 @@ def analyze(
         help="Test dataset this run belongs to (e.g. nodegoat, auth-service) — matches "
              "experiments/datasets/<dataset>/ground_truth.json. Only used together with --run-name."
     ),
+    api_key_alias: Optional[str] = typer.Option(
+        None, "--api-key-alias",
+        help="Which API key to use, for setups with more than one key for the same "
+             "provider (e.g. separate billing budgets). Reads OPENAI_API_KEY_<ALIAS> "
+             "(uppercased). Omit to use the default OPENAI_API_KEY. Cost is attributed "
+             "to this alias in the cost ledger regardless."
+    ),
 ):
     """Analyse source code for security vulnerabilities."""
 
@@ -118,6 +134,9 @@ def analyze(
         raise typer.Exit(1)
 
     config = load_config(config_path)
+    resolved_key, key_alias = config.resolve_api_key(api_key_alias)
+    ledger = CostLedger()
+    run_id = make_run_id(config.llm.model)
 
     # ── named run: redirect all outputs to experiments/datasets/<dataset>/runs/<name>/ ──
     if run_name:
@@ -170,7 +189,10 @@ def analyze(
     tools: Optional[ToolSet] = None
 
     typer.echo("\nBuilding call graph...")
-    builder = CallGraphBuilder(api_key=config.openai_api_key, model=config.llm.model)
+    builder = CallGraphBuilder(
+        api_key=resolved_key, model=config.llm.model,
+        api_key_alias=key_alias, cost_ledger=ledger, run_id=run_id, dataset=dataset,
+    )
     graph, name_index = builder.build(samples, routes=extractor.all_routes)
 
     context_out = save_call_graph(
@@ -181,6 +203,13 @@ def analyze(
     )
     typer.echo(f"Call graph built successfully ({len(graph)} nodes)")
     typer.echo(f"Call graph saved → {context_out}")
+
+    edge_usage = builder.get_edge_resolution_usage()
+    edge_cost = estimate_cost(config.llm.model, edge_usage) if edge_usage else None
+    if edge_usage and edge_usage.total_tokens:
+        cost_label = f"${edge_cost:.4f}" if edge_cost is not None else "unknown (model not in pricing table)"
+        typer.echo(f"Edge resolution   : {edge_usage.total_tokens} tokens, {cost_label}")
+
     tools = ToolSet(graph, name_index)
 
     if visualize:
@@ -202,7 +231,10 @@ def analyze(
         raise typer.Exit(0)
 
     # ── LLM + agent setup ─────────────────────────────────────────────────────
-    client = LLMClient(config.llm)
+    client = LLMClient(
+        config.llm, api_key=resolved_key, api_key_alias=key_alias,
+        cost_ledger=ledger, run_id=run_id, dataset=dataset,
+    )
     agent = ReActAgent(llm=client, tools=tools, max_steps=config.agent.max_steps)
 
     if react:
@@ -240,6 +272,14 @@ def analyze(
             logger.error("Analysis failed for %s: %s", sample.function_name, e)
 
     # ── save results ──────────────────────────────────────────────────────────
+    edge_meta = None
+    if edge_usage and edge_usage.total_tokens:
+        edge_meta = {
+            "edge_resolution_prompt_tokens": edge_usage.prompt_tokens,
+            "edge_resolution_completion_tokens": edge_usage.completion_tokens,
+            "edge_resolution_cost_usd": round(edge_cost, 6) if edge_cost is not None else None,
+        }
+
     out_path = save_run(
         reports=reports,
         samples=samples,
@@ -247,18 +287,36 @@ def analyze(
         model=config.llm.model,
         results_folder=config.output.analysis_folder,
         filename="analysis.json" if run_name else None,
+        extra_meta=edge_meta,
+        run_id=run_id,
     )
 
     # ── summary ───────────────────────────────────────────────────────────────
     found = [r for r in reports if r.vulnerability_found]
     errors = [r for r in reports if r.error]
 
+    analysis_usage = TokenUsage()
+    for r in reports:
+        analysis_usage = analysis_usage + (r.token_usage or TokenUsage())
+    analysis_cost = estimate_cost(config.llm.model, analysis_usage)
+    cost_label = f"${analysis_cost:.4f}" if analysis_cost is not None else "unknown (model not in pricing table)"
+
     typer.echo("\n" + "─" * 50)
     typer.echo(f"Total analysed : {len(reports)}")
     typer.echo(f"Vulnerabilities: {len(found)}")
     typer.echo(f"Clean          : {len(reports) - len(found) - len(errors)}")
     typer.echo(f"Errors         : {len(errors)}")
+    typer.echo(f"Tokens used    : {analysis_usage.total_tokens} (prompt {analysis_usage.prompt_tokens} / completion {analysis_usage.completion_tokens})")
+    typer.echo(f"Estimated cost : {cost_label}")
     typer.echo(f"Results saved  → {out_path}")
+
+    phase_rows = ledger.by_phase(run_id=run_id)
+    if phase_rows:
+        typer.echo(f"\nCost by phase (run {run_id}):")
+        for row in phase_rows:
+            row_cost = f"${row.cost_usd:.4f}" if row.cost_usd is not None else "unknown"
+            typer.echo(f"  {row.group_key:<20} {row.calls:>3} call(s)  {row.total_tokens:>7} tokens  {row_cost}")
+    typer.echo(f"(Run 'python -m src.cli cost' for totals across every run.)")
 
     if found:
         typer.echo("\nFindings:")
@@ -464,6 +522,11 @@ def graph(
     config_path: Optional[str] = typer.Option(
         None, "--config", "-c", help="Path to YAML config file."
     ),
+    api_key_alias: Optional[str] = typer.Option(
+        None, "--api-key-alias",
+        help="Which API key to use for edge resolution (see 'analyze --help'). "
+             "Omit to use the default OPENAI_API_KEY."
+    ),
 ):
     """Build and visualize a call graph from source code or a saved graph JSON."""
 
@@ -502,7 +565,13 @@ def graph(
         typer.echo(f"  {len(samples)} functions extracted")
 
         typer.echo("Building call graph ...")
-        builder = CallGraphBuilder(api_key=config.openai_api_key, model=config.llm.model)
+        resolved_key, key_alias = config.resolve_api_key(api_key_alias)
+        ledger = CostLedger()
+        graph_run_id = f"graph_{make_run_id(config.llm.model)}"
+        builder = CallGraphBuilder(
+            api_key=resolved_key, model=config.llm.model,
+            api_key_alias=key_alias, cost_ledger=ledger, run_id=graph_run_id,
+        )
         g_nodes, name_index = builder.build(samples, routes=extractor.all_routes)
 
         plain = nodes_to_dict(g_nodes)
@@ -513,6 +582,12 @@ def graph(
             source_path=path,
         )
         typer.echo(f"Call graph saved → {context_out}")
+
+        edge_usage = builder.get_edge_resolution_usage()
+        if edge_usage and edge_usage.total_tokens:
+            edge_cost = estimate_cost(config.llm.model, edge_usage)
+            cost_label = f"${edge_cost:.4f}" if edge_cost is not None else "unknown (model not in pricing table)"
+            typer.echo(f"Edge resolution cost: {edge_usage.total_tokens} tokens, {cost_label}")
 
         # print summary
         tools_tmp = ToolSet(g_nodes, name_index)
@@ -581,6 +656,11 @@ def patch(
         False, "--yes", "-y",
         help="Skip the confirmation prompt when using --apply (non-interactive)."
     ),
+    api_key_alias: Optional[str] = typer.Option(
+        None, "--api-key-alias",
+        help="Which API key to use for patch generation (see 'analyze --help'). "
+             "Omit to use the default OPENAI_API_KEY."
+    ),
 ):
     """
     Generate and validate security patches for the flagged functions in a
@@ -613,13 +693,19 @@ def patch(
         raise typer.Exit(1)
 
     config = load_config(config_path)
+    resolved_key, key_alias = config.resolve_api_key(api_key_alias)
+    ledger = CostLedger()
+    dataset = _infer_dataset_from_path(rp)
 
     typer.echo(f"\nRe-extracting source from {source_path} to recover function bodies...")
     extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
     samples = extractor.from_path(source_path)
     sample_index = {(s.function_name, s.file_path): s for s in samples}
 
-    generator = PatchGenerator(api_key=config.openai_api_key, model=config.llm.model)
+    generator = PatchGenerator(
+        api_key=resolved_key, model=config.llm.model,
+        api_key_alias=key_alias, cost_ledger=ledger, run_id=run_id, dataset=dataset,
+    )
     validator = PatchValidator()
 
     patches: list = []
@@ -639,6 +725,8 @@ def patch(
                 "start_line": None, "end_line": None,
                 "unified_diff": "", "patch_valid": False,
                 "patch_error": "source_not_found", "patched_code": None,
+                # no API call was made — genuinely $0, not unknown cost
+                "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0,
             })
             continue
 
@@ -659,6 +747,9 @@ def patch(
                 "start_line": sample.start_line, "end_line": sample.end_line,
                 "unified_diff": "", "patch_valid": False,
                 "patch_error": result.error, "patched_code": None,
+                "prompt_tokens": result.token_usage.prompt_tokens,
+                "completion_tokens": result.token_usage.completion_tokens,
+                "cost_usd": result.cost_usd,
             })
             continue
 
@@ -674,9 +765,11 @@ def patch(
             "patch_valid": validation.valid,
             "patch_error": validation.error,
             "patched_code": validation.patched_code,
+            "prompt_tokens": result.token_usage.prompt_tokens,
+            "completion_tokens": result.token_usage.completion_tokens,
+            "cost_usd": result.cost_usd,
         })
 
-    dataset = _infer_dataset_from_path(rp)
     resolved_output_dir = output_dir or (
         f"experiments/datasets/{dataset}/patches" if dataset else "experiments/results/patches"
     )
@@ -689,10 +782,15 @@ def patch(
     )
 
     valid_count = sum(1 for p in patches if p["patch_valid"])
+    patch_tokens = sum(p["prompt_tokens"] + p["completion_tokens"] for p in patches)
+    known_costs = [p["cost_usd"] for p in patches if p["cost_usd"] is not None]
+    patch_cost = sum(known_costs) if len(known_costs) == len(patches) else None
+    cost_label = f"${patch_cost:.4f}" if patch_cost is not None else "unknown"
     typer.echo("\n" + "─" * 50)
     typer.echo(f"Total patches : {len(patches)}")
     typer.echo(f"Valid         : {valid_count}")
     typer.echo(f"Invalid       : {len(patches) - valid_count}")
+    typer.echo(f"Patch generation cost: {patch_tokens} tokens, {cost_label}")
     typer.echo(f"Patches saved → {out_path}")
 
     if not apply:
@@ -801,6 +899,13 @@ def evaluate(
         typer.echo(f"  Hallucination rate (on flagged) : {report.hallucination_rate():.3f}")
         typer.echo(f"\nDeduplicated vulnerability recall: {ur['detected']}/{ur['planted']} ({ur['recall']:.3f})")
 
+        if report.total_cost_usd is not None:
+            cost_per_tp = report.cost_per_tp()
+            cost_per_tp_label = f"${cost_per_tp:.4f}" if cost_per_tp is not None else "n/a (0 true positives)"
+            typer.echo(f"\nCost: ${report.total_cost_usd:.4f} total ({report.total_tokens} tokens), {cost_per_tp_label} per true positive")
+        else:
+            typer.echo("\nCost: n/a (run predates cost tracking, or model missing from pricing table)")
+
         breakdown = report.cwe_breakdown(gt)
         if breakdown:
             typer.echo("\nPer-CWE breakdown (planted / detected / correct-CWE):")
@@ -825,6 +930,70 @@ def evaluate(
         typer.echo(f"\n{'-' * 60}")
         typer.echo("Comparison across runs:\n")
         typer.echo(comparison_table(reports_and_gt))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cost — cross-run spend, from the persistent cost ledger
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command()
+def cost(
+    run_id: Optional[str] = typer.Option(
+        None, "--run-id",
+        help="Scope the breakdown to a single run_id instead of all-time totals."
+    ),
+    by_run: bool = typer.Option(
+        False, "--by-run",
+        help="List totals per run_id instead of the default phase/key breakdown "
+             "(ignored together with --run-id)."
+    ),
+    limit: int = typer.Option(
+        20, "--limit", help="Max rows to show with --by-run."
+    ),
+):
+    """
+    Show LLM spend recorded in the persistent cost ledger
+    (experiments/cost_ledger.db) — every real API call across every phase
+    (call-graph edge resolution, vulnerability analysis, patch generation)
+    and every run, regardless of which API key paid for it. Read-only.
+    """
+    ledger = CostLedger()
+
+    def _fmt(row) -> str:
+        cost_label = f"${row.cost_usd:.4f}" if row.cost_usd is not None else "unknown"
+        return (
+            f"  {row.group_key:<28} {row.calls:>5} call(s)  "
+            f"{row.total_tokens:>8} tokens  {cost_label}"
+        )
+
+    if by_run and not run_id:
+        typer.echo(f"Cost by run (most recent {limit}):")
+        rows = ledger.by_run(limit=limit)
+        if not rows:
+            typer.echo("  (no runs recorded yet)")
+        for row in rows:
+            typer.echo(_fmt(row))
+        return
+
+    scope_label = f"run {run_id}" if run_id else "all runs"
+    typer.echo(f"Cost — {scope_label}\n")
+
+    total = ledger.total(run_id=run_id)
+    total_label = f"${total.cost_usd:.4f}" if total.cost_usd is not None else "unknown"
+    typer.echo(f"TOTAL: {total.calls} call(s), {total.total_tokens} tokens, {total_label}\n")
+
+    phase_rows = ledger.by_phase(run_id=run_id)
+    typer.echo("By phase:")
+    if not phase_rows:
+        typer.echo("  (nothing recorded yet)")
+    for row in phase_rows:
+        typer.echo(_fmt(row))
+
+    key_rows = ledger.by_api_key(run_id=run_id)
+    if len(key_rows) > 1:
+        typer.echo("\nBy API key:")
+        for row in key_rows:
+            typer.echo(_fmt(row))
 
 
 if __name__ == "__main__":

@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from src.llm.client import VulnerabilityReport
+from src.llm.pricing import TokenUsage, estimate_cost
 from src.models import CodeSample
 
 logger = logging.getLogger(__name__)
 
 
-def _make_run_id(model: str) -> str:
+def make_run_id(model: str) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"analysis_{model.replace('-', '_')}_{ts}"
 
@@ -29,12 +30,17 @@ def save_run(
     results_folder: str = "experiments/results",
     extra_meta: dict | None = None,
     filename: str | None = None,
+    run_id: str | None = None,
 ) -> Path:
     """
     Saves a full analysis run to a timestamped JSON file.
     Returns the path to the saved file.
+
+    Pass `run_id` when the caller already generated one up front (e.g. to
+    attribute cost-ledger rows recorded during analysis to the same run
+    before the run itself is saved) — otherwise one is generated here.
     """
-    run_id = _make_run_id(model)
+    run_id = run_id or make_run_id(model)
     folder = Path(results_folder)
     folder.mkdir(parents=True, exist_ok=True)
     out_path = folder / (filename if filename else f"{run_id}.json")
@@ -51,6 +57,14 @@ def save_run(
     errors = sum(1 for r in reports if r.error is not None)
     hallucinated = sum(1 for r in reports if r.hallucination_flag)
 
+    total_usage = TokenUsage()
+    for r in reports:
+        total_usage = total_usage + (r.token_usage or TokenUsage())
+    # Recomputed from the summed usage rather than summing each report's
+    # cost_usd — avoids float drift, and stays None (not a wrong number) if
+    # the model isn't in the pricing table.
+    total_cost_usd = estimate_cost(model, total_usage)
+
     payload: dict[str, Any] = {
         "schema_version": "1.0",
         "run_id": run_id,
@@ -63,6 +77,10 @@ def save_run(
             "clean": total - found - errors,
             "errors": errors,
             "hallucinated": hallucinated,
+            "total_prompt_tokens": total_usage.prompt_tokens,
+            "total_completion_tokens": total_usage.completion_tokens,
+            "total_tokens": total_usage.total_tokens,
+            "total_cost_usd": round(total_cost_usd, 6) if total_cost_usd is not None else None,
         },
         "findings": [],
     }
@@ -135,6 +153,9 @@ def save_run(
             "unified_diff":        report.unified_diff,
             "patch_valid":         report.patch_valid,
             "patch_error":         report.patch_error,
+            "prompt_tokens":       report.token_usage.prompt_tokens if report.token_usage else 0,
+            "completion_tokens":   report.token_usage.completion_tokens if report.token_usage else 0,
+            "cost_usd":            round(report.cost_usd, 6) if report.cost_usd is not None else None,
         })
 
     with open(out_path, "w", encoding="utf-8") as f:
@@ -203,6 +224,12 @@ def save_patches(
     total = len(patches)
     valid = sum(1 for p in patches if p.get("patch_valid"))
 
+    total_prompt_tokens = sum(p.get("prompt_tokens", 0) for p in patches)
+    total_completion_tokens = sum(p.get("completion_tokens", 0) for p in patches)
+    known_costs = [p.get("cost_usd") for p in patches if p.get("cost_usd") is not None]
+    # None (not 0) if ANY patch's cost is unknown — a partial sum would understate spend
+    total_cost_usd = sum(known_costs) if len(known_costs) == total else None
+
     payload: dict[str, Any] = {
         "schema_version": "1.0",
         "run_id": run_id,
@@ -212,6 +239,9 @@ def save_patches(
             "total_patches": total,
             "valid": valid,
             "invalid": total - valid,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
+            "total_cost_usd": round(total_cost_usd, 6) if total_cost_usd is not None else None,
         },
         "patches": patches,
     }

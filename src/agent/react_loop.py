@@ -16,6 +16,7 @@ from src.agent.memory import AgentMemory
 from src.agent.state import AgentState
 from src.agent.tools import ToolSet
 from src.llm.client import LLMClient, ReActStep, VulnerabilityReport
+from src.llm.pricing import TokenUsage, estimate_cost
 from src.models import CodeSample
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class ReActAgent:
                 code_map[s.function_name] = s.code
 
         tool_history: List[dict] = []
+        usage_total = TokenUsage()
 
         # Inject prior findings for callers/callees from this run's memory
         if self.tools:
@@ -77,6 +79,7 @@ class ReActAgent:
             )
 
             state.reasoning_trace.append(f"step_{step+1}: {react_step.reasoning}")
+            usage_total = usage_total + react_step.token_usage
 
             if react_step.is_final:
                 report = react_step.report
@@ -87,10 +90,13 @@ class ReActAgent:
                         sample.function_name,
                         step + 1,
                     )
-                    report = self.llm.analyze(sample)
+                    report = self.llm.analyze(sample, phase="react_loop_fallback")
+                    usage_total = usage_total + report.token_usage
                     report.analysis_mode = "react_loop_fallback"
                 else:
                     report.analysis_mode = "react_loop"
+                report.token_usage = usage_total
+                report.cost_usd = estimate_cost(self.llm.config.model, usage_total)
                 self._record(sample, report)
                 return report
 
@@ -128,6 +134,7 @@ class ReActAgent:
             start_line=sample.start_line or 0,
             end_line=sample.end_line or 0,
         )
+        usage_total = usage_total + react_step.token_usage
         report = react_step.report or _make_timeout_report(sample)
 
         # ── retry if output is empty ──────────────────────────────────────────
@@ -136,11 +143,14 @@ class ReActAgent:
                 "Empty ReAct output for %s — falling back to single-pass",
                 sample.function_name,
             )
-            report = self.llm.analyze(sample)
+            report = self.llm.analyze(sample, phase="react_loop_fallback")
+            usage_total = usage_total + report.token_usage
             report.analysis_mode = "react_loop_fallback"
         else:
             report.analysis_mode = "react_loop"
 
+        report.token_usage = usage_total
+        report.cost_usd = estimate_cost(self.llm.config.model, usage_total)
         self._record(sample, report)
         return report
 

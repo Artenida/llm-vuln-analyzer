@@ -147,6 +147,10 @@ class EvaluationReport:
     instances: list                         # list[InstanceVerdict]
     unmatched_findings: list                # findings with no corresponding ground truth row
     unresolved_findings: list               # findings whose function name matched >1 gt row, file couldn't disambiguate
+    # Read from the run's summary. None when the run recorded no usage, or ran
+    # against a model missing from the pricing table — never a fabricated $0.
+    total_cost_usd: Optional[float] = None
+    total_tokens: Optional[int] = None
 
     # ── aggregate metrics ────────────────────────────────────────────────────
 
@@ -224,6 +228,17 @@ class EvaluationReport:
             return 0.0
         return sum(1 for i in flagged if i.hallucination_flag) / len(flagged)
 
+    def cost_per_tp(self) -> Optional[float]:
+        """$ cost per true positive — None if cost is unknown for this run, or
+        there are no true positives to divide by (would be a divide-by-zero,
+        not a meaningful $0 rate)."""
+        if self.total_cost_usd is None:
+            return None
+        tp = sum(1 for i in self.instances if i.outcome == "TP")
+        if tp == 0:
+            return None
+        return self.total_cost_usd / tp
+
     def to_dict(self, gt: GroundTruthDataset) -> dict:
         return {
             "schema_version": "1.0",
@@ -238,6 +253,9 @@ class EvaluationReport:
             "unique_vulnerability_recall": self.unique_recall(gt),
             "cwe_breakdown": self.cwe_breakdown(gt),
             "hallucination_rate_on_flagged": round(self.hallucination_rate(), 4),
+            "total_cost_usd": self.total_cost_usd,
+            "total_tokens": self.total_tokens,
+            "cost_per_tp_usd": self.cost_per_tp(),
             "unmatched_findings": self.unmatched_findings,
             "unresolved_findings": self.unresolved_findings,
             "instances": [
@@ -331,6 +349,8 @@ def evaluate_run(
         "/".join(sorted(analysis_modes)) if analysis_modes else None
     )
 
+    run_summary = run_data.get("summary", {})
+
     report = EvaluationReport(
         run_id=run_data.get("run_id", analysis_path.stem),
         dataset=gt.dataset,
@@ -340,6 +360,9 @@ def evaluate_run(
         instances=instances,
         unmatched_findings=unmatched_findings,
         unresolved_findings=unresolved_findings,
+        # absent when a run recorded no usage — stays None, not 0
+        total_cost_usd=run_summary.get("total_cost_usd"),
+        total_tokens=run_summary.get("total_tokens"),
     )
     return report, gt
 
@@ -366,17 +389,20 @@ def comparison_table(reports_and_gt: list) -> str:
     """Markdown table comparing multiple runs (e.g. semantic vs agentic mode) against
     ground truth. `reports_and_gt` is a list of (EvaluationReport, GroundTruthDataset)."""
     header = (
-        "| Run | Mode | Precision | Recall | F1 | CWE Acc (TP) | Unique Recall | Hallucination Rate |\n"
-        "|-----|------|-----------|--------|----|--------------|--------------:|--------------------:|"
+        "| Run | Mode | Precision | Recall | F1 | CWE Acc (TP) | Unique Recall | Hallucination Rate | Cost (USD) | Cost/TP |\n"
+        "|-----|------|-----------|--------|----|--------------|--------------:|--------------------:|-----------:|--------:|"
     )
     rows = [header]
     for report, gt in reports_and_gt:
         m = report.detection_metrics()
         ur = report.unique_recall(gt)
+        cost_str = f"${report.total_cost_usd:.4f}" if report.total_cost_usd is not None else "n/a"
+        cost_per_tp = report.cost_per_tp()
+        cost_per_tp_str = f"${cost_per_tp:.4f}" if cost_per_tp is not None else "n/a"
         rows.append(
             f"| {report.run_id} | {report.analysis_mode or '?'} "
             f"| {m.precision:.2f} | {m.recall:.2f} | {m.f1:.2f} "
             f"| {report.cwe_accuracy():.2f} | {ur['detected']}/{ur['planted']} "
-            f"| {report.hallucination_rate():.2f} |"
+            f"| {report.hallucination_rate():.2f} | {cost_str} | {cost_per_tp_str} |"
         )
     return "\n".join(rows)

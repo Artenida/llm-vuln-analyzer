@@ -14,9 +14,12 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 from src.context.edge_cache import EdgeCache
+from src.llm.cost_ledger import CostLedger
 from src.llm.openai_client import OpenAIResolver
+from src.llm.pricing import TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +32,29 @@ _DEFAULT_CACHE_PATH = os.path.join(
 
 class LLMEdgeResolver:
 
-    def __init__(self, api_key: str, model: str = "o4-mini", cache_path: str = None):
-        self.client = OpenAIResolver(api_key, model=model)
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "o4-mini",
+        cache_path: str = None,
+        api_key_alias: str = "default",
+        cost_ledger: Optional[CostLedger] = None,
+        run_id: Optional[str] = None,
+        dataset: Optional[str] = None,
+    ):
+        self.client = OpenAIResolver(
+            api_key, model=model, api_key_alias=api_key_alias,
+            cost_ledger=cost_ledger, run_id=run_id, dataset=dataset,
+        )
         self.cache = EdgeCache(
             cache_path or _DEFAULT_CACHE_PATH
         )
+
+    def get_usage(self) -> TokenUsage:
+        """Cumulative token usage from real LLM calls only — cache hits in
+        resolve() return before ever reaching OpenAIResolver, so they never
+        count here."""
+        return self.client.get_usage()
 
     def resolve(
         self,

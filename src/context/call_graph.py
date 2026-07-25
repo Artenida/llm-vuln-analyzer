@@ -6,6 +6,8 @@ from src.models import CodeSample
 from src.context.symbol_resolver import SymbolResolver
 from src.context.llm_edge_resolver import LLMEdgeResolver
 from src.ingestion.parser import TreeSitterParser
+from src.llm.cost_ledger import CostLedger
+from src.llm.pricing import TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +53,26 @@ _SINK_NAME_PATTERNS = [
 
 class CallGraphBuilder:
 
-    def __init__(self, api_key: str = None, model: str = "o4-mini"):
+    def __init__(
+        self,
+        api_key: str = None,
+        model: str = "o4-mini",
+        api_key_alias: str = "default",
+        cost_ledger: Optional[CostLedger] = None,
+        run_id: Optional[str] = None,
+        dataset: Optional[str] = None,
+    ):
         self.parser = TreeSitterParser()
         self.symbol_resolver = SymbolResolver()
-        self.llm_resolver = LLMEdgeResolver(api_key, model=model) if api_key else None
+        self.llm_resolver = LLMEdgeResolver(
+            api_key, model=model, api_key_alias=api_key_alias,
+            cost_ledger=cost_ledger, run_id=run_id, dataset=dataset,
+        ) if api_key else None
+
+    def get_edge_resolution_usage(self) -> Optional[TokenUsage]:
+        """Cumulative token usage spent resolving call graph edges via the LLM
+        fallback, or None if no LLM resolver was configured (no api_key)."""
+        return self.llm_resolver.get_usage() if self.llm_resolver else None
 
     def _make_id(self, file_path: str, function_name: str) -> str:
         return f"{file_path}::{function_name}"

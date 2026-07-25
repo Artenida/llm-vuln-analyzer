@@ -54,6 +54,25 @@ class AppConfig:
     def openai_api_key(self) -> Optional[str]:
         return os.environ.get("OPENAI_API_KEY")
 
+    def resolve_api_key(self, alias: Optional[str] = None) -> tuple[Optional[str], str]:
+        """
+        Resolves an API key by alias, for projects that hold more than one key
+        for the same provider (e.g. separate billing accounts/budgets). The
+        default key is OPENAI_API_KEY; a named key "team2" is read from
+        OPENAI_API_KEY_TEAM2. Returns (key_value, alias_used) — alias_used is
+        always "default" when no alias is given, so cost-ledger rows have a
+        stable label to group by even for single-key setups.
+        """
+        if not alias or alias == "default":
+            return os.environ.get("OPENAI_API_KEY"), "default"
+        env_name = f"OPENAI_API_KEY_{alias.upper()}"
+        key = os.environ.get(env_name)
+        if not key:
+            raise EnvironmentError(
+                f"No API key found for alias '{alias}' — set {env_name}."
+            )
+        return key, alias
+
 
 def load_config(path: Optional[str] = None) -> AppConfig:
     if path is None:

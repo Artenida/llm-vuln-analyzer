@@ -224,6 +224,124 @@ no LLM calls, no changes to the ground truth schema or `VulnerabilityReport`.
 
 ---
 
+## Sprint 7 — Cost & Token Tracking (DONE)
+
+**Status:** Complete — see `docs/cost-tracking.md` for the full design.
+
+**Goal:** Right now no run reports what it cost. `response.usage` (prompt/completion
+tokens) comes back from every OpenAI call in `src/llm/client.py` and
+`src/llm/openai_client.py` and is discarded — `docs/evaluation.md` explicitly notes
+"no API key or cost involved" because there is nothing to show. This is a gap, not
+just a nice-to-have: Sprint 6 already names "cost ceilings" as a scaling constraint
+without any number behind it, and the thesis needs a real answer to "is ReAct's
+accuracy gain worth its extra API cost compared to single-pass/call-graph mode" —
+that's an empty question until token usage and $ cost are actually measured per mode.
+
+### Tasks
+
+#### 7.1 Token usage capture
+Capture `response.usage` (prompt_tokens, completion_tokens, total_tokens) at every
+`chat.completions.create` call site:
+- `LLMClient.analyze()` and `LLMClient.reason()` in `src/llm/client.py`
+- `OpenAIResolver.resolve_edge()` in `src/llm/openai_client.py` — **only on an actual
+  API call**, not a cache hit (`edge_cache.json` already avoids repeat LLM calls for
+  edge resolution; counting a cache hit as spend would over-report cost every time
+  the same graph is reused across runs)
+- A small `TokenUsage` dataclass threaded onto `VulnerabilityReport` and `ReActStep`.
+  For the ReAct loop, `react_loop.py` must sum usage across **every step** of a
+  function's loop, not just the final step — a verdict after 3 tool calls costs 4x
+  what a single-pass verdict costs, and only the sum reflects that.
+
+#### 7.2 Pricing table
+`src/llm/pricing.py` — a static $/1M-input-token and $/1M-output-token table for the
+models this project actually runs (`o4-mini`, `gpt-4o-mini`), converting a
+`TokenUsage` into a dollar figure. A model missing from the table must report cost
+as `None` ("unknown"), never a silently wrong guessed number.
+
+#### 7.3 Run-level aggregation
+- `run_saver.save_run()`: add `total_prompt_tokens` / `total_completion_tokens` /
+  `total_cost_usd` to the run `summary`, plus per-finding `token_usage`/`cost_usd`
+  (same pattern Sprint 3 used to add `unified_diff`/`patch_valid` per finding)
+- Report call-graph edge-resolution cost separately from per-finding analysis cost —
+  the graph is built once and cached, then reused across many `analyze` runs, so
+  folding its cost into each run's per-finding total would double-count it every
+  time the same cached graph backs a new run
+
+#### 7.4 `evaluate` cost-effectiveness columns
+Extend `comparison_table()` in `src/evaluation/evaluator.py` to show `cost_usd` and
+`cost_per_TP` alongside precision/recall/F1 when every compared run carries usage
+data — this is what turns Sprint 6's "cost ceilings" concern into the same kind of
+concrete number Sprint 5 produced for accuracy (e.g. "precision 0.79 vs 1.00").
+Archived pre-Sprint-7 runs have no usage data — show `n/a`, not `$0.00`, so an old
+run is never misread as free.
+
+#### 7.5 CLI surfacing
+- `analyze` prints a one-line token/cost summary at the end of a run, next to the
+  existing found/clean/error counts
+- Stretch: `--budget-usd` ceiling on `analyze` — stop starting new function analyses
+  once running spend crosses it, warn, and save the partial run as-is. Only worth
+  doing if it falls out naturally alongside Sprint 6.1's checkpoint/resume work;
+  don't build it standalone.
+
+#### 7.6 Tests
+Mocked `response.usage` covering: correct capture in `analyze()`/`reason()`;
+correct multi-step summation in the ReAct loop; unknown model → `cost_usd is None`
+not a crash; edge-resolver cache hits contribute zero tokens.
+
+#### 7.7 Persistent cross-run ledger + multi-API-key attribution (added after initial
+7.1–7.6 landed, once real usage surfaced two gaps: patch generation was the one
+AI-calling phase left untracked, and cost only existed inside one run's own JSON
+with no way to total spend across runs)
+- `src/llm/cost_ledger.py` — `CostLedger`: a SQLite-backed, append-only
+  `cost_events` table (one row per real LLM call, tagged with `phase`,
+  `run_id`, `dataset`, `api_key_alias`, `model`, tokens, `cost_usd`) at
+  `experiments/cost_ledger.db` (gitignored, like the rest of `experiments/`).
+  Query methods (`total()`, `by_phase()`, `by_api_key()`, `by_run()`) all
+  degrade a group's cost to `None` if any event in it has unknown pricing,
+  never a partial sum. A ledger write failure is logged and swallowed —
+  cost tracking must never fail an analysis run.
+- `PatchGenerator.generate()` now captures usage/cost and logs
+  `phase="patch_generation"` — closes the one AI-calling phase Sprint 7.1–7.3
+  didn't cover.
+- `AppConfig.resolve_api_key(alias)` (`src/config.py`) — multi-key support:
+  default key from `OPENAI_API_KEY`, a named key `"team2"` from
+  `OPENAI_API_KEY_TEAM2`. Every LLM-calling constructor (`LLMClient`,
+  `OpenAIResolver`, `PatchGenerator`) takes `api_key_alias` and stamps every
+  ledger row with it — the raw key value itself is never written to the
+  ledger. Deliberately attribution-only, not rotation/failover/round-robin
+  dispatch across keys (that's a request-dispatch concern, arguably Sprint
+  6.1's rate-limit scope, not a cost-accounting one).
+- CLI: `--api-key-alias` on `analyze`/`graph`/`patch`; `analyze` prints a
+  per-run phase breakdown pulled live from the ledger; new `cost` command
+  (`cost`, `cost --run-id <id>`, `cost --by-run`) for cross-run/cross-phase/
+  cross-key totals.
+- `tests/test_cost_ledger.py` — 10 tests: record/query correctness, `run_id`
+  scoping, unknown-cost group handling, multi-key attribution, `AppConfig`
+  key resolution (default/named/missing), `LLMClient` actually writing to a
+  provided ledger, and that omitting the ledger doesn't change behavior.
+
+**Exit criteria:**
+- [x] Every `analyze` run (single-pass, call-graph, ReAct) reports total tokens + $
+      cost in its saved JSON, with ReAct's cost correctly summed across all steps
+- [ ] `evaluate` shows cost alongside precision/recall/F1 for at least two archived
+      runs of different modes — **not yet done**: this needs a fresh live-API-key
+      `analyze` run (all runs archived under `experiments/datasets/` predate Sprint 7
+      and have no `total_cost_usd` in their summary, so `evaluate` correctly reports
+      them as `n/a` rather than fabricating a number; a real cost-vs-accuracy
+      comparison table needs at least one post-Sprint-7 run to compare against)
+- [x] Call-graph edge-resolution cache hits are never counted as new spend
+- [x] A run against a model missing from the pricing table degrades to "cost
+      unknown" rather than a fabricated number
+- [x] Every AI-calling phase (edge resolution, analysis, patch generation) is
+      tracked, not just analysis
+- [x] Cost persists across runs in a queryable form (`cost_ledger.db`), and
+      spend from more than one API key is attributed by alias, not merged
+- [x] `docs/cost-tracking.md` written documenting the pricing table, the
+      per-step ReAct summation, the ledger schema, multi-key attribution, and
+      what still needs a live run to demonstrate
+
+---
+
 ## Backlog (Unscheduled)
 
 | Item | Notes |
@@ -248,3 +366,4 @@ no LLM calls, no changes to the ground truth schema or `VulnerabilityReport`.
 | 5 | `docs/evaluation.md` — automated precision/recall/F1 harness, matching rules |
 | 6 | `docs/scaling.md` — batch processing, caching, incremental analysis |
 | 6 | `docs/sarif-integration.md` — GitHub Code Scanning setup |
+| 7 | `docs/cost-tracking.md` — pricing table, per-step ReAct cost summation, cost-vs-accuracy comparison |

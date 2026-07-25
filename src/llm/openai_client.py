@@ -6,8 +6,12 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Optional
 
 from openai import OpenAI
+
+from src.llm.cost_ledger import CostLedger
+from src.llm.pricing import TokenUsage, estimate_cost, extract_usage
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +61,28 @@ Which candidate is being called by "{raw_call}"?
 
 class OpenAIResolver:
 
-    def __init__(self, api_key: str, model: str = "o4-mini"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "o4-mini",
+        api_key_alias: str = "default",
+        cost_ledger: Optional[CostLedger] = None,
+        run_id: Optional[str] = None,
+        dataset: Optional[str] = None,
+    ):
         self.client = OpenAI(api_key=api_key)
         self.model = model
+        self.api_key_alias = api_key_alias
+        self.cost_ledger = cost_ledger
+        self.run_id = run_id
+        self.dataset = dataset
+        # Cumulative usage across every real API call this resolver has made.
+        # Only incremented here — a cache hit in LLMEdgeResolver never reaches
+        # this method, so cached edge resolutions never inflate this total.
+        self.usage_total = TokenUsage()
+
+    def get_usage(self) -> TokenUsage:
+        return self.usage_total
 
     def resolve_edge(self, payload: dict) -> dict:
         """
@@ -95,6 +118,21 @@ class OpenAIResolver:
                     {"role": "user", "content": user_message},
                 ],
             )
+
+            call_usage = extract_usage(response)
+            self.usage_total = self.usage_total + call_usage
+            if self.cost_ledger is not None:
+                self.cost_ledger.record(
+                    provider="openai",
+                    api_key_alias=self.api_key_alias,
+                    model=self.model,
+                    phase="edge_resolution",
+                    usage=call_usage,
+                    cost_usd=estimate_cost(self.model, call_usage),
+                    run_id=self.run_id,
+                    dataset=self.dataset,
+                    function_name=payload.get("caller"),
+                )
 
             raw = response.choices[0].message.content or ""
             raw = raw.strip()

@@ -6,10 +6,13 @@ Generation only — does not touch disk or apply anything. See PatchValidator fo
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import openai
+
+from src.llm.cost_ledger import CostLedger
+from src.llm.pricing import TokenUsage, estimate_cost, extract_usage
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +21,8 @@ logger = logging.getLogger(__name__)
 class PatchResult:
     unified_diff: str
     error: Optional[str] = None
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
+    cost_usd: Optional[float] = None
 
 
 _PATCH_SYSTEM = (
@@ -61,11 +66,23 @@ Rules:
 
 class PatchGenerator:
 
-    def __init__(self, api_key: str, model: str = "o4-mini"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "o4-mini",
+        api_key_alias: str = "default",
+        cost_ledger: Optional[CostLedger] = None,
+        run_id: Optional[str] = None,
+        dataset: Optional[str] = None,
+    ):
         if not api_key:
             raise EnvironmentError("OPENAI_API_KEY is required for patch generation.")
         self.model = model
         self.client = openai.OpenAI(api_key=api_key)
+        self.api_key_alias = api_key_alias
+        self.cost_ledger = cost_ledger
+        self.run_id = run_id
+        self.dataset = dataset
 
     def generate(
         self,
@@ -92,14 +109,30 @@ class PatchGenerator:
                     {"role": "user", "content": prompt},
                 ],
             )
+            usage = extract_usage(response)
+            cost_usd = estimate_cost(self.model, usage)
+            if self.cost_ledger is not None:
+                self.cost_ledger.record(
+                    provider="openai",
+                    api_key_alias=self.api_key_alias,
+                    model=self.model,
+                    phase="patch_generation",
+                    usage=usage,
+                    cost_usd=cost_usd,
+                    run_id=self.run_id,
+                    dataset=self.dataset,
+                    function_name=function_name,
+                )
+
             raw = response.choices[0].message.content or ""
             diff = _strip_fences(raw)
             if not diff.strip():
-                return PatchResult(unified_diff="", error="empty_llm_response")
-            return PatchResult(unified_diff=diff)
+                return PatchResult(unified_diff="", error="empty_llm_response", token_usage=usage, cost_usd=cost_usd)
+            return PatchResult(unified_diff=diff, token_usage=usage, cost_usd=cost_usd)
         except openai.OpenAIError as e:
             logger.error("OpenAI API error during patch generation: %s", e)
-            return PatchResult(unified_diff="", error=f"api_error: {e}")
+            # the call failed before returning usage — $0, not unknown cost
+            return PatchResult(unified_diff="", error=f"api_error: {e}", cost_usd=0.0)
 
 
 def _strip_fences(raw: str) -> str:

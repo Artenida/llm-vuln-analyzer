@@ -9,12 +9,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import openai
 
 from src.config import LLMConfig
+from src.llm.cost_ledger import CostLedger
+from src.llm.pricing import TokenUsage, estimate_cost, extract_usage
 from src.models import CodeSample
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,8 @@ class VulnerabilityReport:
     unified_diff: str = ""
     patch_valid: Optional[bool] = None
     patch_error: Optional[str] = None
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
+    cost_usd: Optional[float] = None
 
 
 @dataclass
@@ -54,6 +58,8 @@ class ReActStep:
     tool_name: Optional[str] = None      # e.g. "get_callees"
     tool_args: Optional[dict] = None     # e.g. {"function_name": "findById"}
     reasoning: Optional[str] = None      # agent's scratchpad thought
+    # usage for THIS step's LLM call only — react_loop.py sums across steps
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
 
 
 _SAFE_REPORT = VulnerabilityReport(
@@ -243,21 +249,52 @@ Remember: only flag what is directly in the target — not in its callers or cal
 
 class LLMClient:
 
-    def __init__(self, config: LLMConfig):
+    def __init__(
+        self,
+        config: LLMConfig,
+        api_key: Optional[str] = None,
+        api_key_alias: str = "default",
+        cost_ledger: Optional[CostLedger] = None,
+        run_id: Optional[str] = None,
+        dataset: Optional[str] = None,
+    ):
         self.config = config
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise EnvironmentError("OPENAI_API_KEY environment variable is not set.")
         self.client = openai.OpenAI(api_key=api_key)
+        self.api_key_alias = api_key_alias
+        self.cost_ledger = cost_ledger
+        self.run_id = run_id
+        self.dataset = dataset
+
+    def _log_cost(self, phase: str, usage: TokenUsage, cost_usd: Optional[float], function_name: Optional[str] = None) -> None:
+        if self.cost_ledger is None:
+            return
+        self.cost_ledger.record(
+            provider="openai",
+            api_key_alias=self.api_key_alias,
+            model=self.config.model,
+            phase=phase,
+            usage=usage,
+            cost_usd=cost_usd,
+            run_id=self.run_id,
+            dataset=self.dataset,
+            function_name=function_name,
+        )
 
     # ── single-pass analysis ──────────────────────────────────────────────────
 
     def analyze(
         self,
         sample: CodeSample,
-        context_prompt: str,
+        context_prompt: str = "",
+        phase: str = "call_graph_context",
     ) -> VulnerabilityReport:
-        user_message = context_prompt
+        # _ANALYSIS_SYSTEM only demands "respond with JSON" — the response schema
+        # and the code itself live in the user message, so an empty context_prompt
+        # would ask the model to analyse nothing.
+        user_message = context_prompt or _build_minimal_prompt(sample)
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
@@ -269,7 +306,11 @@ class LLMClient:
                 ],
             )
             raw = response.choices[0].message.content or ""
-            return self._parse_report(raw, sample)
+            report = self._parse_report(raw, sample)
+            report.token_usage = extract_usage(response)
+            report.cost_usd = estimate_cost(self.config.model, report.token_usage)
+            self._log_cost(phase, report.token_usage, report.cost_usd, sample.function_name)
+            return report
         except openai.OpenAIError as e:
             logger.error("OpenAI API error: %s", e)
             r = _make_safe(sample)
@@ -284,6 +325,7 @@ class LLMClient:
         tool_history: list[dict],
         start_line: int = 0,
         end_line: int = 0,
+        phase: str = "react_loop",
     ) -> ReActStep:
         """
         One ReAct reasoning step. Returns either a tool call or a final report.
@@ -312,7 +354,11 @@ class LLMClient:
                 ],
             )
             raw = response.choices[0].message.content or ""
-            return self._parse_react_step(raw, sample)
+            step = self._parse_react_step(raw, sample)
+            step.token_usage = extract_usage(response)
+            step_cost = estimate_cost(self.config.model, step.token_usage)
+            self._log_cost(phase, step.token_usage, step_cost, sample.function_name)
+            return step
         except openai.OpenAIError as e:
             logger.error("OpenAI API error in reason(): %s", e)
             return ReActStep(
@@ -387,6 +433,33 @@ class LLMClient:
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _build_minimal_prompt(sample: CodeSample) -> str:
+    """Self-contained single-function analysis prompt, used when no call-graph
+    context prompt was supplied (e.g. the ReAct loop's single-pass fallback)."""
+    return (
+        f"You are an expert security code reviewer. The code is written in "
+        f"{sample.language.value}.\n\n"
+        "TASK: Find security vulnerabilities DIRECTLY present in the TARGET FUNCTION only.\n"
+        "Assume NOT VULNERABLE unless you see direct evidence in the code below.\n\n"
+        f"TARGET FUNCTION: {sample.function_name}\n"
+        f"File: {sample.file_path}  Lines: {sample.start_line}–{sample.end_line}\n"
+        f"```{sample.language.value}\n{sample.code}\n```\n\n"
+        "Respond with this EXACT JSON — no markdown, no extra text:\n"
+        "{\n"
+        '  "vulnerability_found": boolean,\n'
+        '  "cwe_id": string (e.g. "CWE-89") or null,\n'
+        '  "affected_lines": [integers — file-relative line numbers in TARGET only],\n'
+        '  "severity": "low" | "medium" | "high" | "critical" | null,\n'
+        '  "explanation": string,\n'
+        '  "patch_suggestion": string,\n'
+        '  "confidence": float 0.0–1.0 — probability that a vulnerability EXISTS.\n'
+        '               MUST be > 0.5 when vulnerability_found is true.\n'
+        '               MUST be < 0.5 when vulnerability_found is false.,\n'
+        '  "hallucination_flag": boolean\n'
+        "}"
+    )
+
 
 def _strip_fences(raw: str) -> str:
     text = raw.strip()
