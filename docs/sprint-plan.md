@@ -191,36 +191,89 @@ no LLM calls, no changes to the ground truth schema or `VulnerabilityReport`.
 
 ---
 
-## Sprint 6 — Scale & Multi-Language
+## Sprint 6 — Real-World Repository Evaluation
 
-**Goal:** Analyze real-world open-source repositories (hundreds to thousands of functions) without hitting API rate limits or cost ceilings.
+**Goal:** Defend the results against the most predictable examiner criticism —
+*"you evaluated on small apps you wrote yourself, with bugs you planted
+yourself."* Three of the four current datasets are exactly that
+(auth-service 25 functions, billing-service 22, orders-service 27); only
+NodeGoat (56) is third-party. Running against a real open-source repository
+with vulnerabilities **someone else** chose is what makes the precision/recall
+numbers externally valid.
+
+Scale work is in scope only where it blocks that goal. This sprint is
+deliberately *not* about making the tool a product.
 
 ### Tasks
 
-#### 6.1 Batch Analysis
-- Process functions in parallel batches (configurable concurrency)
-- Rate-limit aware: exponential backoff on 429s
-- Resume from last checkpoint if interrupted
+#### 6.1 Honest coverage reporting (DONE)
+Functions over `max_function_lines` (200) were dropped with no log, no counter,
+no warning — on a real repo that silently shrinks the denominator behind every
+recall and coverage number, with nothing in the output disclosing it. Now
+`TreeSitterParser.last_skipped` / `CodeExtractor.skipped_functions` record every
+oversized function; `analyze` prints a skip count with an explicit coverage
+percentage, and `extraction.json` carries `functions_skipped_oversized`,
+`coverage`, and a per-function `skipped_oversized[]` list.
 
-#### 6.2 Incremental / Cached Analysis
-- Hash each function's code; skip re-analysis if hash matches a cached result
-- Only re-analyze functions that changed since last run (git-diff integration)
+This was a validity fix, not a scale feature — worth doing regardless of
+whether a large repo is ever analysed.
 
-#### 6.3 TypeScript Support
-- TypeScript is currently mapped to the JavaScript grammar — good for syntax but misses type annotations
-- Add `tree-sitter-typescript` grammar for richer type-aware context in prompts
+#### 6.2 Select and prepare a real-world dataset
+Pick one open-source repository in a supported language (Python / JavaScript /
+C / C++) with **externally documented** vulnerabilities — CVE-linked fixing
+commits, or a recognised third-party benchmark app. Check out the *vulnerable*
+commit, derive ground truth from the fix diff (or the project's own documented
+issue list), and record it in the existing `experiments/datasets/<name>/`
+layout. Size target: a few hundred functions — large enough to be credible,
+small enough to afford.
 
-#### 6.4 Large-Function Handling
-- Functions over `max_function_lines` (currently 200) are silently skipped
-- Instead: chunk them into overlapping windows and analyze each window; merge results
+Whole repositories only. Function-level vulnerability corpora (BigVul, Devign,
+DiverseVul, PrimeVul) ship *detached* functions with no surrounding project, so
+no call graph can be built from them — they structurally cannot exercise the
+inter-procedural context that is this tool's central claim. Worth stating
+explicitly in the thesis as the reason those standard benchmarks were not used.
 
-#### 6.5 Filtering & Triage UI
-- `show` command enhancements: filter by severity, CWE, file, function name
-- Export to SARIF format for GitHub Code Scanning / VS Code integration
+#### 6.3 Estimate before committing
+Use the Sprint 7 cost ledger to project the run before paying for it: take
+measured per-function cost from a small dataset, multiply by the target repo's
+function count, per mode. A ReAct run over several hundred functions may simply
+be unaffordable — better to know beforehand and scope the dataset accordingly.
+
+#### 6.4 Throughput — only if the sequential run proves intolerable
+The analysis loop is sequential. For a thesis "finishes overnight" is
+acceptable, so concurrency is a convenience, not a blocker. If a run does prove
+impractical: bounded parallel batches, exponential backoff on 429s, and
+checkpoint/resume so an interrupted run isn't lost. Do not build this
+speculatively.
+
+#### 6.5 TypeScript — only if the chosen repo needs it
+`.ts` already maps to the JavaScript grammar and parses; only type annotations
+are lost. Purely a consequence of the 6.2 dataset choice — zero work if that
+repo is plain JS. Decide after 6.2, not before.
+
+**Explicitly out of scope** (considered and dropped, not deferred):
+- **Incremental / cached analysis** (hash-and-skip re-analysis). Beyond being
+  unrequested, it works against the evaluation method: LLM output is
+  non-deterministic and Sprint 4 already relied on comparing repeated rounds.
+  Serving cached verdicts would mask exactly the run-to-run variance that may
+  need measuring.
+- **SARIF export / GitHub Code Scanning integration.** An IDE- and
+  CI-integration feature with no bearing on any thesis claim.
+- **Large-function chunking** (overlapping windows + merged results). 6.1 makes
+  the skips visible; chunking is only worth building if the reported count on a
+  real repo turns out to be material, and it carries real result-merging
+  complexity.
 
 **Exit criteria:**
-- Successfully analyze a 500-function real-world repo in < 30 minutes
-- SARIF export validated by GitHub Advanced Security
+- [x] No function is dropped from a run without being counted and reported;
+      every run states its own coverage
+- [ ] One real-world third-party repository analysed end to end, with ground
+      truth derived from external evidence (CVE fix commits or a documented
+      vulnerability list) rather than self-planted bugs
+- [ ] `evaluate` produces precision/recall/F1 **and** cost per true positive on
+      that repo, for at least two analysis modes
+- [ ] Reported coverage on that repo is stated in the thesis alongside the
+      accuracy numbers, so recall is never quoted over an unstated denominator
 
 ---
 
@@ -364,6 +417,5 @@ with no way to total spend across runs)
 | 3 | `docs/patching.md` — patch generation & validation approach |
 | 4 | `docs/business-logic.md` — business-logic CWE taxonomy, checklist, evaluation results |
 | 5 | `docs/evaluation.md` — automated precision/recall/F1 harness, matching rules |
-| 6 | `docs/scaling.md` — batch processing, caching, incremental analysis |
-| 6 | `docs/sarif-integration.md` — GitHub Code Scanning setup |
+| 6 | `docs/real-world-evaluation.md` — dataset selection & ground-truth derivation, coverage reporting, results |
 | 7 | `docs/cost-tracking.md` — pricing table, per-step ReAct cost summation, cost-vs-accuracy comparison |

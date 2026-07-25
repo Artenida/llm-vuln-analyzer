@@ -19,6 +19,17 @@ class FunctionNode:
     ast_node: Node
 
 
+@dataclass
+class SkippedFunction:
+    """A function too long to analyse (over max_function_lines). Tracked so
+    coverage can be reported honestly rather than the function vanishing."""
+    name: str
+    start_line: int
+    end_line: int
+    line_count: int
+    file_path: str = ""
+
+
 # ──────────────────────────────────────────────────────
 # Grammar loading
 # ──────────────────────────────────────────────────────
@@ -181,7 +192,8 @@ def _walk_functions(node: Node,
                     language: str,
                     source_bytes: bytes,
                     results: list,
-                    max_lines: int):
+                    max_lines: int,
+                    skipped: list):
 
     target_types = FUNCTION_NODE_TYPES.get(language, set())
 
@@ -210,6 +222,17 @@ def _walk_functions(node: Node,
                     ast_node=node,
                 )
             )
+        else:
+            # Recorded, not discarded: an unreported skip silently shrinks the
+            # denominator every recall/coverage number is computed against.
+            skipped.append(
+                SkippedFunction(
+                    name=name,
+                    start_line=start,
+                    end_line=end,
+                    line_count=line_count,
+                )
+            )
 
         # Named methods are sometimes assigned inside another named
         # function's body instead of declared at the top level — e.g. the
@@ -224,6 +247,7 @@ def _walk_functions(node: Node,
                 source_bytes,
                 results,
                 max_lines,
+                skipped,
             )
 
         return
@@ -235,6 +259,7 @@ def _walk_functions(node: Node,
             source_bytes,
             results,
             max_lines,
+            skipped,
         )
 
 
@@ -303,6 +328,8 @@ class TreeSitterParser:
 
     def __init__(self, max_function_lines: int = 200):
         self.max_function_lines = max_function_lines
+        # Functions dropped by the most recent extract_functions() call
+        self.last_skipped: list[SkippedFunction] = []
 
     @property
     def supported_languages(self) -> list[str]:
@@ -335,6 +362,11 @@ class TreeSitterParser:
     def extract_functions(self,
                           content: str,
                           language: str) -> list[FunctionNode]:
+        """Functions in `content` that are within max_function_lines.
+        Any that were too long are left in `last_skipped` for the caller to
+        report — check it after each call."""
+
+        self.last_skipped = []
 
         tree = self.parse(content, language)
 
@@ -351,6 +383,7 @@ class TreeSitterParser:
             source_bytes,
             results,
             self.max_function_lines,
+            self.last_skipped,
         )
 
         _mask_nested_bodies(results, source_bytes)

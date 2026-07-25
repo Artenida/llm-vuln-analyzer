@@ -9,7 +9,7 @@ from typing import Union
 
 from src.models import EXTENSION_MAP, CodeSample, Language
 from src.models.code_sample import RouteDefinition
-from src.ingestion.parser import TreeSitterParser
+from src.ingestion.parser import SkippedFunction, TreeSitterParser
 from src.ingestion.import_extractor import ImportExtractor
 from src.ingestion.route_extractor import RouteExtractor
 
@@ -40,11 +40,21 @@ class CodeExtractor:
         # (e.g. Express `router.get(...)` wiring) typically have none, so this
         # cannot live on a per-function CodeSample the way imports do.
         self._all_routes: list[RouteDefinition] = []
+        # Functions too long to analyse, accumulated across every file seen.
+        # Reported rather than dropped silently — they are real functions the
+        # run did not cover, so any coverage claim has to account for them.
+        self._skipped_functions: list[SkippedFunction] = []
 
     @property
     def all_routes(self) -> list[RouteDefinition]:
         """All route registrations found across the last from_path()/from_snippet() call."""
         return self._all_routes
+
+    @property
+    def skipped_functions(self) -> list[SkippedFunction]:
+        """Functions skipped for exceeding max_function_lines across the last
+        from_path()/from_snippet() call."""
+        return self._skipped_functions
 
     # ── public entry points ───────────────────────────────────────────────────
 
@@ -54,6 +64,7 @@ class CodeExtractor:
         Returns all extracted functions as CodeSample objects.
         """
         self._all_routes = []
+        self._skipped_functions = []
 
         p = Path(path).resolve()
         if not p.exists():
@@ -73,6 +84,7 @@ class CodeExtractor:
         language should be 'python', 'javascript', 'c', or 'cpp'.
         """
         self._all_routes = []
+        self._skipped_functions = []
 
         if isinstance(language, str):
             try:
@@ -124,6 +136,15 @@ class CodeExtractor:
                          file_path: str) -> list[CodeSample]:
         lang_str = language.value
         functions = self.parser.extract_functions(content, lang_str)
+
+        for sk in self.parser.last_skipped:
+            sk.file_path = file_path
+            self._skipped_functions.append(sk)
+            logger.warning(
+                "Skipping %s in %s — %d lines exceeds max_function_lines (%d); "
+                "it will not be analysed",
+                sk.name, file_path, sk.line_count, self.parser.max_function_lines,
+            )
 
         if not functions:
             logger.debug("No functions extracted from %s", file_path)

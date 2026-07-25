@@ -128,6 +128,26 @@ class TestTreeSitterParser:
         fns = parser.extract_functions(long_fn, "python")
         assert len(fns) == 0, "Function over line limit should be skipped"
 
+    def test_oversized_function_is_reported_not_silently_dropped(self):
+        """An unreported skip shrinks the denominator of every coverage and
+        recall number, without anything in the output saying so."""
+        long_fn = "def long_function():\n" + "    pass\n" * 300
+        parser = TreeSitterParser(max_function_lines=50)
+        parser.extract_functions(long_fn, "python")
+
+        assert len(parser.last_skipped) == 1
+        sk = parser.last_skipped[0]
+        assert sk.name == "long_function"
+        assert sk.line_count == 301
+
+    def test_last_skipped_resets_between_calls(self):
+        long_fn = "def long_function():\n" + "    pass\n" * 300
+        parser = TreeSitterParser(max_function_lines=50)
+        parser.extract_functions(long_fn, "python")
+        parser.extract_functions("def small():\n    return 1\n", "python")
+
+        assert parser.last_skipped == [], "stale skips must not leak into the next file"
+
     def test_empty_file_returns_empty_list(self):
         fns = self.parser.extract_functions("", "python")
         assert fns == []
@@ -268,6 +288,31 @@ class TestCodeExtractor:
             assert s.start_line is not None
             assert s.end_line is not None
             assert s.end_line >= s.start_line
+
+    def test_skipped_functions_exposed_with_file_path(self, tmp_path):
+        f = tmp_path / "big.py"
+        f.write_text("def small():\n    return 1\n\n"
+                     "def big():\n" + "    pass\n" * 300)
+        extractor = CodeExtractor(max_function_lines=50)
+        samples = extractor.from_path(f)
+
+        assert [s.function_name for s in samples] == ["small"]
+        assert len(extractor.skipped_functions) == 1
+        sk = extractor.skipped_functions[0]
+        assert sk.name == "big"
+        assert sk.file_path.endswith("big.py"), "skips must be attributable to a file"
+
+    def test_skipped_functions_reset_between_runs(self, tmp_path):
+        big = tmp_path / "big.py"
+        big.write_text("def big():\n" + "    pass\n" * 300)
+        clean = tmp_path / "clean.py"
+        clean.write_text("def small():\n    return 1\n")
+
+        extractor = CodeExtractor(max_function_lines=50)
+        extractor.from_path(big)
+        extractor.from_path(clean)
+
+        assert extractor.skipped_functions == []
 
 
 # ── integration: auth service ────────────────────────────────────────────────

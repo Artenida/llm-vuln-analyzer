@@ -170,8 +170,13 @@ def save_extraction_results(
     source_path: str,
     output_folder: str,
     filename: str | None = None,
+    skipped: list | None = None,
 ) -> Path:
-    """Saves extracted functions before analysis phase."""
+    """Saves extracted functions before analysis phase.
+
+    `skipped` records functions too long to analyse, so a run's coverage can be
+    stated exactly rather than inferred from the extracted count alone.
+    """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path(output_folder)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -188,6 +193,9 @@ def save_extraction_results(
             "code":          sample.code,
         })
 
+    skipped = skipped or []
+    total_seen = len(samples) + len(skipped)
+
     payload = {
         "metadata": {
             "source_path":  source_path,
@@ -195,8 +203,20 @@ def save_extraction_results(
         },
         "summary": {
             "functions_found": len(samples),
+            "functions_skipped_oversized": len(skipped),
+            "coverage": round(len(samples) / total_seen, 4) if total_seen else 1.0,
         },
         "results": results,
+        "skipped_oversized": [
+            {
+                "function_name": sk.name,
+                "file_path":     sk.file_path,
+                "start_line":    sk.start_line,
+                "end_line":      sk.end_line,
+                "line_count":    sk.line_count,
+            }
+            for sk in skipped
+        ],
     }
 
     with open(out_path, "w", encoding="utf-8") as f:

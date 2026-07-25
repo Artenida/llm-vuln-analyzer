@@ -170,16 +170,30 @@ def analyze(
     for s in samples:
         lang_counts[s.language.value] = lang_counts.get(s.language.value, 0) + 1
 
+    skipped = extractor.skipped_functions
+
     typer.echo("\nExtraction summary")
     typer.echo(f"  Functions : {len(samples)}")
     for lang, count in sorted(lang_counts.items()):
         typer.echo(f"  {lang:<12}: {count}")
+    if skipped:
+        covered = len(samples) / (len(samples) + len(skipped))
+        typer.echo(
+            f"  Skipped   : {len(skipped)} function(s) over "
+            f"{config.ingestion.max_function_lines} lines — NOT analysed "
+            f"({covered:.1%} coverage)"
+        )
+        for sk in skipped[:5]:
+            typer.echo(f"    {sk.name} ({sk.line_count} lines) {sk.file_path}")
+        if len(skipped) > 5:
+            typer.echo(f"    ... and {len(skipped) - 5} more (see extraction JSON)")
 
     extraction_out = save_extraction_results(
         samples=samples,
         source_path=source_label,
         output_folder=config.output.extraction_folder,
         filename="extraction.json" if run_name else None,
+        skipped=skipped,
     )
     typer.echo(f"\nExtraction saved → {extraction_out}")
 
