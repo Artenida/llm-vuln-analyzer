@@ -170,4 +170,9 @@ class OpenAIResolver:
 
         except (json.JSONDecodeError, Exception) as e:
             logger.debug("OpenAI edge resolution failed for %r: %s", raw_call, e)
-            return {"target": None, "confidence": 0.0, "reasoning": f"error: {e}"}
+            # "error" is what tells the caller not to cache this. A failed call
+            # and a genuine "this resolves to nothing" both come back with
+            # target=None, and caching the first as if it were the second turns
+            # one dropped connection into a permanently missing edge.
+            return {"target": None, "confidence": 0.0,
+                    "reasoning": f"error: {e}", "error": str(e)}

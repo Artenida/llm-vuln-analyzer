@@ -30,6 +30,24 @@ _DEFAULT_CACHE_PATH = os.path.join(
 )
 
 
+def _is_usable_cache_entry(entry: dict) -> bool:
+    """Whether a cache hit can be served instead of paying for a fresh call.
+
+    Anything with a real verdict qualifies, including target=None ("this call
+    resolves to nothing internal") — that is an answer, not a gap.
+
+    Failures do not qualify. Current failures are tagged `error`; entries
+    written before that tag existed are recognised by the "error: ..." string
+    the old code put in `reasoning`. Both are re-queried rather than believed.
+    """
+    if entry.get("error"):
+        return False
+    reasoning = entry.get("reasoning")
+    if isinstance(reasoning, str) and reasoning.startswith("error:"):
+        return False
+    return True
+
+
 class LLMEdgeResolver:
 
     def __init__(
@@ -59,6 +77,14 @@ class LLMEdgeResolver:
         # Edges left unresolved purely because we were offline. Reported so a
         # dry-run graph is never mistaken for a complete one.
         self._offline_misses = 0
+        # Cached "resolves to nothing" answers served without an API call.
+        # Reported so the saving is visible rather than assumed.
+        self._negative_cache_hits = 0
+
+    @property
+    def negative_cache_hits(self) -> int:
+        """Cached negative verdicts served instead of re-bought."""
+        return self._negative_cache_hits
 
     @property
     def offline_misses(self) -> int:
@@ -129,8 +155,16 @@ class LLMEdgeResolver:
         if cached:
             # Normalise old cache entries that used different key names
             cached = self._normalise(cached, candidates)
-            if cached.get("target") is not None:
+            if _is_usable_cache_entry(cached):
+                # A cached "resolves to nothing" is a real answer and is served
+                # like any other. This used to fall through to a fresh LLM call:
+                # the write path cached negatives ("to avoid re-querying the
+                # same dead ends") but the read path ignored them, so on a repo
+                # where most calls are to built-ins — 1077 of 1176 cached
+                # entries on Juice Shop — nearly the whole graph was re-bought
+                # on every single run.
                 cached["resolved_by"] = "cache"
+                self._negative_cache_hits += 0 if cached.get("target") else 1
                 return cached
 
         # ── offline: a cache miss is as far as we go ──────────────────────────
@@ -148,6 +182,13 @@ class LLMEdgeResolver:
 
         result = self.client.resolve_edge(payload)
         result["resolved_by"] = "llm"
+
+        if result.get("error"):
+            # Never cache a failure. It would be indistinguishable from a real
+            # "no match" on the next run and would suppress the edge forever.
+            logger.debug("Not caching failed edge resolution for %r: %s",
+                         raw_call, result.get("error"))
+            return result
 
         if result.get("target"):
             logger.debug(

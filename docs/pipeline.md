@@ -103,7 +103,25 @@ already cached).
 ```
 
 That number is a useful cost signal before committing: it is the upper bound on
-how many edge-resolution calls your first real run will pay for.
+how many edge-resolution calls your first real run will pay for. Once the graph
+has been resolved once it drops to zero — see below.
+
+### Edge resolution is paid once, not once per run
+
+`experiments/results/context/edge_cache.json` stores every resolved edge,
+including the ones that resolve to nothing ("this call goes to a built-in").
+Both kinds are served from cache, so a second run against unchanged code pays
+nothing for its graph.
+
+This was broken until 2026-07-25: negatives were written to the cache but never
+read back, so they were re-bought on every run. On Juice Shop that was 1447 of
+1557 entries — about $6 per run, 72% of all spend on the dataset. If you see
+edge-resolution cost that does not fall to near zero on a second run against
+the same code, that is the symptom to look for.
+
+Failed calls are **not** cached. A dropped connection and a genuine "resolves
+to nothing" both return no target, and caching the first as if it were the
+second would silently remove an edge from every future graph.
 
 **Check the coverage line.** Functions over `max_function_lines` (200, in
 `experiments/configs/default.yaml`) cannot be analysed:
