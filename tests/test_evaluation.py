@@ -278,3 +278,110 @@ def test_saved_comparison_carries_the_uncurated_warning(tmp_path):
 
     assert "not valid" in body.lower()
     assert "7" in body
+
+
+# ── same function name, same file: real code does this ───────────────────────
+# Juice Shop has four Sequelize setters called `set` in models/user.ts. Keyed
+# on file+name alone, one finding is scored against every one of them.
+
+COLLIDING_GT = {
+    "schema_version": "1.0",
+    "dataset": "collide",
+    "description": "two same-named setters in one file",
+    "source_path": "app",
+    "functions": [
+        {"function_name": "set", "file": "models/user.js", "source_lines": [10, 20],
+         "vulnerable": True, "cwe_id": "CWE-79", "severity": "medium"},
+        {"function_name": "set", "file": "models/user.js", "source_lines": [30, 40],
+         "vulnerable": False, "cwe_id": None, "severity": None},
+    ],
+}
+
+
+def test_colliding_rows_are_separated_by_line_overlap(tmp_path):
+    """The vulnerable setter is at 10-20 and the clean one at 30-40; the run
+    flagged only the second. Without line matching both rows see the same
+    finding: one bogus TP and one bogus FP."""
+    gt_path = _write(tmp_path, "gt.json", COLLIDING_GT)
+    run = _write(tmp_path, "run.json", {
+        "run_id": "r", "model": "m", "source_path": "app",
+        "findings": [
+            {"function_name": "set", "file_path": "app/models/user.js",
+             "vulnerability_found": False, "cwe_id": None, "affected_lines": [],
+             "analysis_mode": "react_loop"},
+            {"function_name": "set", "file_path": "app/models/user.js",
+             "vulnerability_found": True, "cwe_id": "CWE-79", "affected_lines": [35],
+             "analysis_mode": "react_loop"},
+        ],
+    })
+
+    report, gt = evaluate_run(run, gt_path)
+    m = report.detection_metrics()
+
+    # the flagged finding sits at line 35, inside the CLEAN row (30-40)
+    assert m.fp == 1        # flagged a clean function
+    assert m.fn == 1        # missed the vulnerable one
+    assert m.tp == 0
+
+
+def test_each_finding_is_claimed_by_only_one_row(tmp_path):
+    """One detection must not become several true positives."""
+    gt_path = _write(tmp_path, "gt.json", COLLIDING_GT)
+    run = _write(tmp_path, "run.json", {
+        "run_id": "r", "model": "m", "source_path": "app",
+        "findings": [
+            {"function_name": "set", "file_path": "app/models/user.js",
+             "vulnerability_found": True, "cwe_id": "CWE-79", "affected_lines": [15],
+             "analysis_mode": "react_loop"},
+        ],
+    })
+
+    report, gt = evaluate_run(run, gt_path)
+    m = report.detection_metrics()
+
+    assert m.tp == 1        # matched the row covering line 15
+    assert m.fp == 0        # and NOT also charged against the clean row
+    assert m.tn == 1
+
+
+def test_rows_without_source_lines_keep_the_old_behaviour(tmp_path):
+    """Datasets written before source_lines existed must score exactly as they
+    did — auth-service and nodegoat depend on it."""
+    gt_path = _write(tmp_path, "gt.json", GT_PAYLOAD)
+    run = _write(tmp_path, "run.json", {
+        "run_id": "r", "model": "m", "source_path": "x",
+        "findings": [_finding("login", "controllers/auth.js", True, "CWE-89")],
+    })
+
+    report, _ = evaluate_run(run, gt_path)
+    m = report.detection_metrics()
+
+    assert m.tp == 1
+    assert m.fp == 0
+
+
+def test_instance_id_is_unique_per_row_when_lines_are_known(tmp_path):
+    gt = load_ground_truth(_write(tmp_path, "gt.json", COLLIDING_GT))
+
+    ids = [e.instance_id for e in gt.entries]
+
+    assert len(set(ids)) == 2
+    assert "@10-20" in ids[0] and "@30-40" in ids[1]
+
+
+def test_unseparable_rows_are_reported_as_ambiguous(tmp_path):
+    """When a finding carries no lines there is nothing to match on. Pair by
+    order, but say so rather than presenting a guess as a verdict."""
+    gt_path = _write(tmp_path, "gt.json", COLLIDING_GT)
+    run = _write(tmp_path, "run.json", {
+        "run_id": "r", "model": "m", "source_path": "app",
+        "findings": [
+            {"function_name": "set", "file_path": "app/models/user.js",
+             "vulnerability_found": True, "cwe_id": "CWE-79", "affected_lines": [],
+             "analysis_mode": "react_loop"},
+        ],
+    })
+
+    report, _ = evaluate_run(run, gt_path)
+
+    assert len(report.unresolved_findings) >= 1

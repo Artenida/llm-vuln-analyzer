@@ -124,6 +124,12 @@ def build_ground_truth(
         functions.append({
             "function_name": s.function_name,
             "file": rel,
+            # Where the function actually sits. Recorded because file+name is
+            # not a unique key in real code — Juice Shop has four Sequelize
+            # setters called `set` in one file — and without a line range the
+            # evaluator cannot tell which row a finding belongs to, so one
+            # finding gets scored against every same-named row.
+            "source_lines": [s.start_line, s.end_line],
             "vulnerable": bool(is_touched),
             "cwe_id": None,          # must be filled in by hand — never inferred here
             "severity": None,
@@ -131,6 +137,8 @@ def build_ground_truth(
             "notes": notes,
         })
 
+    # Stable sort: rows for the same (file, function_name) keep the order they
+    # were extracted in, which is source order.
     functions.sort(key=lambda e: (e["file"], e["function_name"]))
 
     total_seen = len(samples) + len(skipped)

@@ -20,9 +20,20 @@ class GroundTruthEntry:
     affected_lines: list = field(default_factory=list)
     notes: str = ""
     duplicate_of: Optional[str] = None  # "<file>::<function_name>" of the canonical instance
+    # [start, end] of the function in the source. Optional: datasets written
+    # before this existed have none, and everything falls back to name+file.
+    source_lines: list = field(default_factory=list)
 
     @property
     def instance_id(self) -> str:
+        # file::name is not unique in real code (four `set` setters in one
+        # Juice Shop model). Where a line range is known, include it so each
+        # row has an id of its own — without it, four rows share one id and a
+        # single finding is scored against all four. Rows with no line range
+        # keep the old format, so ids and `duplicate_of` references in
+        # pre-existing datasets are untouched.
+        if self.source_lines:
+            return f"{self.file}::{self.function_name}@{self.source_lines[0]}-{self.source_lines[-1]}"
         return f"{self.file}::{self.function_name}"
 
     @property
@@ -62,6 +73,7 @@ def load_ground_truth(path: str | Path) -> GroundTruthDataset:
             affected_lines=e.get("affected_lines") or [],
             notes=e.get("notes", ""),
             duplicate_of=e.get("duplicate_of"),
+            source_lines=e.get("source_lines") or [],
         )
         for e in data.get("functions", [])
     ]

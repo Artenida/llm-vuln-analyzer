@@ -287,6 +287,93 @@ def _build_finding_index(findings: list) -> dict:
     return index
 
 
+def _overlap_score(gt_entry: GroundTruthEntry, finding: dict) -> int:
+    """How strongly a finding points at this particular function.
+
+    Used only to break ties between ground-truth rows that share a file and a
+    function name. A finding's affected_lines are clamped to its own function's
+    range when the run is saved, so lines landing inside this row's source range
+    are strong evidence the finding belongs to it.
+    """
+    if not gt_entry.source_lines:
+        return 0
+    start, end = gt_entry.source_lines[0], gt_entry.source_lines[-1]
+    lines = finding.get("affected_lines") or []
+    return sum(1 for line in lines if start <= line <= end)
+
+
+def _assign_findings(gt: GroundTruthDataset, finding_index: dict) -> dict:
+    """Maps ground-truth row index -> the finding that belongs to it (or None).
+
+    Assignment is done per (function_name, file) group rather than row by row,
+    because the interesting case is several rows sharing one key: four
+    Sequelize setters called `set` in one file. Matching each row
+    independently hands the same finding to all four, which counts one
+    detection as several true positives *and* several false positives.
+
+    Within a colliding group, findings are matched to rows by line overlap and
+    each finding is claimed at most once. Rows and findings that cannot be
+    separated by lines fall back to source order, which is the order both were
+    produced in.
+    """
+    assignment: dict = {}
+    ambiguous: set = set()
+
+    groups: dict = defaultdict(list)
+    for i, entry in enumerate(gt.entries):
+        groups[(entry.function_name, _norm_path(entry.file))].append(i)
+
+    for (name, file_suffix), idxs in groups.items():
+        candidates = [
+            c for c in finding_index.get(name, [])
+            if _norm_path(c.get("file_path") or "").endswith(file_suffix)
+        ]
+
+        if len(idxs) == 1:
+            # No collision — keep the original behaviour exactly, including
+            # the "same name in another file entirely" ambiguity signal.
+            entry = gt.entries[idxs[0]]
+            finding, is_ambiguous = _match_finding(entry, finding_index.get(name, []))
+            assignment[idxs[0]] = finding
+            if is_ambiguous:
+                ambiguous.add(idxs[0])
+            continue
+
+        remaining = list(candidates)
+
+        # Strongest line evidence first, so a confident match is not stolen by
+        # a weaker one earlier in the list.
+        scored = sorted(
+            (
+                (_overlap_score(gt.entries[i], c), i, ci)
+                for i in idxs
+                for ci, c in enumerate(remaining)
+            ),
+            key=lambda t: -t[0],
+        )
+
+        taken_rows: set = set()
+        taken_findings: set = set()
+        for score, row_i, cand_i in scored:
+            if score <= 0 or row_i in taken_rows or cand_i in taken_findings:
+                continue
+            assignment[row_i] = remaining[cand_i]
+            taken_rows.add(row_i)
+            taken_findings.add(cand_i)
+
+        # Anything the lines could not separate: pair off in source order and
+        # record that the verdict was positional rather than evidenced.
+        leftover_rows = [i for i in idxs if i not in taken_rows]
+        leftover_findings = [c for ci, c in enumerate(remaining) if ci not in taken_findings]
+        for row_i, finding in zip(leftover_rows, leftover_findings):
+            assignment[row_i] = finding
+            ambiguous.add(row_i)
+        for row_i in leftover_rows[len(leftover_findings):]:
+            assignment[row_i] = None
+
+    return {"assignment": assignment, "ambiguous": ambiguous}
+
+
 def _match_finding(gt_entry: GroundTruthEntry, candidates: list) -> tuple:
     """Returns (finding_or_None, ambiguous: bool). Always disambiguates by file suffix
     match — never assumes a same-named finding belongs to this row without checking,
@@ -324,14 +411,18 @@ def evaluate_run(
     instances: list = []
     unresolved_findings: list = []
 
-    for entry in gt.entries:
-        candidates = finding_index.get(entry.function_name, [])
-        finding, ambiguous = _match_finding(entry, candidates)
-        if ambiguous:
+    resolved = _assign_findings(gt, finding_index)
+    assignment, ambiguous_rows = resolved["assignment"], resolved["ambiguous"]
+
+    for i, entry in enumerate(gt.entries):
+        finding = assignment.get(i)
+        if i in ambiguous_rows:
             unresolved_findings.append({
                 "function_name": entry.function_name,
                 "expected_file": entry.file,
-                "candidate_files": [c.get("file_path") for c in candidates],
+                "candidate_files": [
+                    c.get("file_path") for c in finding_index.get(entry.function_name, [])
+                ],
             })
         instances.append(_score_instance(entry, finding))
 
