@@ -29,6 +29,18 @@ Use --react to switch from single-pass semantic to the agentic ReAct loop.
 from __future__ import annotations
 
 import json
+import sys
+
+# Force UTF-8 on our own streams before anything prints. The default Windows
+# console codepage is cp1252, which cannot encode the '→' this CLI writes in
+# nearly every progress line — and an encoding crash mid-run used to abandon a
+# paid analysis after the API calls had already been billed. errors="replace"
+# is the belt-and-braces: no console can ever kill a run over a glyph.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass  # not a reconfigurable text stream (pytest capture, a pipe, ...)
 
 # Load .env automatically so users don't have to export env vars manually
 try:
@@ -46,6 +58,7 @@ from src.config import load_config
 from src.context.call_graph import CallGraphBuilder
 from src.ingestion.extractor import CodeExtractor
 from src.results import save_extraction_results, save_run, save_call_graph, save_patches, make_run_id
+from src.results.checkpoint import CheckpointHeader, CheckpointMismatch, RunCheckpoint
 from src.results.patch_generator import PatchGenerator
 from src.results.patch_validator import PatchValidator
 from src.results.export_graph import export_dot, export_html
@@ -112,6 +125,18 @@ def analyze(
         False, "--visualize", "-v",
         help="Export interactive HTML + DOT call graph after analysis."
     ),
+    resume: bool = typer.Option(
+        False, "--resume",
+        help="Continue an interrupted run from its checkpoint, re-analysing only the "
+             "functions it never reached. Requires the same --run-name (that is where "
+             "the checkpoint lives), source, model and mode as the run being resumed."
+    ),
+    budget_usd: Optional[float] = typer.Option(
+        None, "--budget-usd",
+        help="Stop starting new function analyses once this run's spend reaches this "
+             "many dollars, then save what completed. The ceiling is checked between "
+             "functions, so the final total can exceed it by at most one function's cost."
+    ),
     run_name: Optional[str] = typer.Option(
         None, "--run-name", "-n",
         help="Named experiment run. Outputs go to experiments/datasets/<dataset>/runs/<name>/ "
@@ -151,7 +176,10 @@ def analyze(
         config.output.context_folder    = run_dir
         config.output.analysis_folder   = run_dir
 
-    extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
+    extractor = CodeExtractor(
+        max_function_lines=config.ingestion.max_function_lines,
+        skip_dirs=config.ingestion.skip_dirs,
+    )
 
     # ── extraction ────────────────────────────────────────────────────────────
     if path:
@@ -206,9 +234,12 @@ def analyze(
     tools: Optional[ToolSet] = None
 
     typer.echo("\nBuilding call graph...")
+    if dry_run:
+        typer.echo("  (dry run: edge resolution is cache-only — no LLM calls, no spend)")
     builder = CallGraphBuilder(
         api_key=resolved_key, model=config.llm.model,
         api_key_alias=key_alias, cost_ledger=ledger, run_id=run_id, dataset=dataset,
+        offline_edges=dry_run,
     )
     graph, name_index = builder.build(samples, routes=extractor.all_routes)
 
@@ -244,6 +275,13 @@ def analyze(
 
     # ── dry run ───────────────────────────────────────────────────────────────
     if dry_run:
+        misses = builder.get_offline_misses()
+        if misses:
+            typer.echo(
+                f"\n{misses} ambiguous edge(s) left unresolved — resolving them needs the "
+                "LLM, which a dry run does not call. The real run will resolve them "
+                "(and pay for the ones not already cached)."
+            )
         typer.echo("\nDry run complete — no LLM calls made.")
         raise typer.Exit(0)
 
@@ -262,31 +300,113 @@ def analyze(
     typer.echo(f"\nAnalyzing {len(samples)} functions with {config.llm.model}")
     typer.echo(f"  Mode: {mode_label}\n")
 
-    reports = []
+    # ── checkpoint ────────────────────────────────────────────────────────────
+    # Written after every function so an interrupted run can be resumed instead
+    # of re-paying for work already done.
+    checkpoint = RunCheckpoint(config.output.analysis_folder)
+    ck_header = CheckpointHeader(
+        model=config.llm.model,
+        source_path=source_label,
+        analysis_mode="react_loop" if react else "call_graph_context",
+        total_samples=len(samples),
+    )
+    completed: Dict[int, object] = {}
+
+    if resume:
+        if checkpoint.exists:
+            try:
+                completed = checkpoint.load_completed(ck_header, samples=samples)
+            except CheckpointMismatch as e:
+                typer.echo(f"\nCannot resume: {e}", err=True)
+                raise typer.Exit(1)
+            typer.echo(
+                f"\nResuming from {checkpoint.path}: {len(completed)} function(s) already "
+                f"analysed, {len(samples) - len(completed)} to go."
+            )
+        else:
+            typer.echo(
+                f"\n--resume passed but no checkpoint at {checkpoint.path} — starting from scratch."
+            )
+    elif checkpoint.exists:
+        typer.echo(
+            f"\nDiscarding an existing checkpoint at {checkpoint.path} "
+            "(pass --resume to continue that run instead of starting over)."
+        )
+        checkpoint.clear()
+
+    checkpoint.start(ck_header)
+
+    # Spend already on this run's clock: resumed analysis + the edge resolution
+    # paid for above. Both count against --budget-usd, otherwise a resumed run
+    # would get a fresh budget every time it restarted.
+    def _spend_so_far() -> Optional[float]:
+        usage = TokenUsage()
+        for r in completed.values():
+            usage = usage + (r.token_usage or TokenUsage())
+        analysed = estimate_cost(config.llm.model, usage)
+        if analysed is None:
+            return None
+        return analysed + (edge_cost or 0.0)
+
+    budget_enforceable = True
+    stopped_early: Optional[str] = None
 
     # ── analysis loop ─────────────────────────────────────────────────────────
-    for i, sample in enumerate(samples, 1):
-        typer.echo(f"  [{i:>2}/{len(samples)}] {sample.function_name:<30}", nl=False)
+    try:
+        for i, sample in enumerate(samples, 1):
+            idx = i - 1
+            if idx in completed:
+                continue
 
-        try:
-            if react and tools is not None:
-                report = agent.run(sample, graph, all_samples=samples)
-            else:
-                hop = tools.trace_one_hop(sample.function_name, sample.file_path)
-                prompt = _build_context_prompt(sample, hop, tools, samples)
-                report = client.analyze(sample, context_prompt=prompt)
-                report.analysis_mode = "call_graph_context"
+            if budget_usd is not None and budget_enforceable:
+                spend = _spend_so_far()
+                if spend is None:
+                    budget_enforceable = False
+                    typer.echo(
+                        f"\n  --budget-usd cannot be enforced: {config.llm.model} is not in the "
+                        "pricing table, so spend is unknown. Continuing without a ceiling — "
+                        "treating unknown cost as $0 would be worse.\n"
+                    )
+                elif spend >= budget_usd:
+                    # Both figures at the same precision — a ceiling of $0.001
+                    # rendered as "$0.00" reads like a bug in the ceiling.
+                    stopped_early = (
+                        f"budget ceiling reached — ${spend:.4f} of ${budget_usd:.4f} spent "
+                        f"after {len(completed)} function(s)"
+                    )
+                    break
 
-            reports.append(report)
+            typer.echo(f"  [{i:>2}/{len(samples)}] {sample.function_name:<30}", nl=False)
 
-            status = "VULN" if report.vulnerability_found else "clean"
-            sev = f" [{report.severity}]" if report.vulnerability_found and report.severity else ""
-            err = f" ERR:{report.error}" if report.error else ""
-            typer.echo(f" → {status}{sev} (conf:{report.confidence:.2f}){err}")
+            try:
+                if react and tools is not None:
+                    report = agent.run(sample, graph, all_samples=samples)
+                else:
+                    hop = tools.trace_one_hop(sample.function_name, sample.file_path)
+                    prompt = _build_context_prompt(sample, hop, tools, samples)
+                    report = client.analyze(sample, context_prompt=prompt)
+                    report.analysis_mode = "call_graph_context"
 
-        except Exception as e:
-            typer.echo(" → ERROR")
-            logger.error("Analysis failed for %s: %s", sample.function_name, e)
+                completed[idx] = report
+                checkpoint.append(idx, report)
+
+                status = "VULN" if report.vulnerability_found else "clean"
+                sev = f" [{report.severity}]" if report.vulnerability_found and report.severity else ""
+                err = f" ERR:{report.error}" if report.error else ""
+                typer.echo(f" → {status}{sev} (conf:{report.confidence:.2f}){err}")
+
+            except Exception as e:
+                typer.echo(" → ERROR")
+                logger.error("Analysis failed for %s: %s", sample.function_name, e)
+
+    except KeyboardInterrupt:
+        # The LLM calls behind these results are already paid for — save them
+        # rather than letting Ctrl-C throw the run away.
+        stopped_early = f"interrupted by user after {len(completed)} function(s)"
+
+    # Findings must be ordered by function, not by completion: a resumed run
+    # fills in the gaps out of order.
+    reports = [completed[k] for k in sorted(completed)]
 
     # ── save results ──────────────────────────────────────────────────────────
     edge_meta = None
@@ -296,6 +416,16 @@ def analyze(
             "edge_resolution_completion_tokens": edge_usage.completion_tokens,
             "edge_resolution_cost_usd": round(edge_cost, 6) if edge_cost is not None else None,
         }
+
+    if stopped_early:
+        # Recorded in the run itself: a partial run scored as though it were
+        # complete would read as catastrophic recall rather than an unfinished
+        # run, and nothing else in analysis.json would reveal the difference.
+        edge_meta = dict(edge_meta or {})
+        edge_meta["partial_run"] = True
+        edge_meta["partial_reason"] = stopped_early
+        edge_meta["functions_analysed"] = len(reports)
+        edge_meta["functions_total"] = len(samples)
 
     out_path = save_run(
         reports=reports,
@@ -308,6 +438,12 @@ def analyze(
         run_id=run_id,
     )
 
+    if stopped_early:
+        # Keep the checkpoint — it is what --resume reads.
+        pass
+    else:
+        checkpoint.clear()
+
     # ── summary ───────────────────────────────────────────────────────────────
     found = [r for r in reports if r.vulnerability_found]
     errors = [r for r in reports if r.error]
@@ -319,6 +455,19 @@ def analyze(
     cost_label = f"${analysis_cost:.4f}" if analysis_cost is not None else "unknown (model not in pricing table)"
 
     typer.echo("\n" + "─" * 50)
+    if stopped_early:
+        typer.echo(f"PARTIAL RUN — {stopped_early}.")
+        typer.echo(
+            f"  {len(reports)} of {len(samples)} function(s) analysed and saved. Resume with:\n"
+            f"    python -m src.cli analyze --resume "
+            + (f"--run-name {run_name} " if run_name else "")
+            + (f"--dataset {dataset} " if dataset else "")
+            + "... (same --path/--config/mode flags as this run)"
+        )
+        typer.echo(
+            "  Do NOT evaluate this run as if it were complete — every function it never "
+            "reached scores as a miss.\n"
+        )
     typer.echo(f"Total analysed : {len(reports)}")
     typer.echo(f"Vulnerabilities: {len(found)}")
     typer.echo(f"Clean          : {len(reports) - len(found) - len(errors)}")
@@ -573,7 +722,10 @@ def graph(
         typer.echo(f"Loaded graph with {len(plain)} nodes from {graph_file}")
     else:
         config = load_config(config_path)
-        extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
+        extractor = CodeExtractor(
+            max_function_lines=config.ingestion.max_function_lines,
+            skip_dirs=config.ingestion.skip_dirs,
+        )
         typer.echo(f"\nIngesting {path} ...")
         samples = extractor.from_path(path)
         if not samples:
@@ -715,7 +867,10 @@ def patch(
     dataset = _infer_dataset_from_path(rp)
 
     typer.echo(f"\nRe-extracting source from {source_path} to recover function bodies...")
-    extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
+    extractor = CodeExtractor(
+        max_function_lines=config.ingestion.max_function_lines,
+        skip_dirs=config.ingestion.skip_dirs,
+    )
     samples = extractor.from_path(source_path)
     sample_index = {(s.function_name, s.file_path): s for s in samples}
 
@@ -1011,7 +1166,10 @@ def bootstrap_ground_truth(
         raise typer.Exit(1)
 
     config = load_config(config_path)
-    extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
+    extractor = CodeExtractor(
+        max_function_lines=config.ingestion.max_function_lines,
+        skip_dirs=config.ingestion.skip_dirs,
+    )
 
     typer.echo(f"\nExtracting functions from {repo} ...")
     samples = extractor.from_path(str(repo))

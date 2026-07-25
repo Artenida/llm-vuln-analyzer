@@ -41,6 +41,7 @@ class LLMEdgeResolver:
         cost_ledger: Optional[CostLedger] = None,
         run_id: Optional[str] = None,
         dataset: Optional[str] = None,
+        offline: bool = False,
     ):
         self.client = OpenAIResolver(
             api_key, model=model, api_key_alias=api_key_alias,
@@ -49,6 +50,20 @@ class LLMEdgeResolver:
         self.cache = EdgeCache(
             cache_path or _DEFAULT_CACHE_PATH
         )
+        # Offline: serve from cache, never call the API. Used by `analyze
+        # --dry-run`, which is documented as making no LLM calls — building the
+        # graph through the normal path would bill edge resolution before the
+        # dry-run check was ever reached. Cache hits stay available because
+        # they are free; a miss resolves to "unknown" instead of to a purchase.
+        self.offline = offline
+        # Edges left unresolved purely because we were offline. Reported so a
+        # dry-run graph is never mistaken for a complete one.
+        self._offline_misses = 0
+
+    @property
+    def offline_misses(self) -> int:
+        """Edges an offline run declined to resolve. Zero on a normal run."""
+        return self._offline_misses
 
     def get_usage(self) -> TokenUsage:
         """Cumulative token usage from real LLM calls only — cache hits in
@@ -117,6 +132,11 @@ class LLMEdgeResolver:
             if cached.get("target") is not None:
                 cached["resolved_by"] = "cache"
                 return cached
+
+        # ── offline: a cache miss is as far as we go ──────────────────────────
+        if self.offline:
+            self._offline_misses += 1
+            return {"target": None, "confidence": 0.0, "resolved_by": "offline_skip"}
 
         # ── LLM call ──────────────────────────────────────────────────────────
         payload = {

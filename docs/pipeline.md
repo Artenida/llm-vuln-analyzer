@@ -79,11 +79,31 @@ Until step 4, `evaluate` prints a loud warning that its numbers are invalid.
 
 ---
 
-## 2. Dry run — extraction + call graph, no LLM spend
+## 2. Dry run — extraction + call graph
 
 ```bash
 python -m src.cli analyze --path /path/to/target --dry-run
 ```
+
+A dry run makes **no LLM calls** — verified against the ledger, not just
+intended. It used to: the call graph is built before the dry-run check, and
+edge resolution would bill for it (a Juice Shop dry run reached 200 calls /
+$0.89 before this was fixed). Edge resolution now runs *cache-only* under
+`--dry-run`, so previously-resolved edges still come back for free and a miss
+resolves to "unknown" instead of to a purchase.
+
+The consequence to understand: a dry-run graph is a **preview**, not the graph
+the real run will use. Ambiguous edges that have never been resolved stay
+unresolved, and the run reports how many:
+
+```
+1393 ambiguous edge(s) left unresolved — resolving them needs the LLM, which a
+dry run does not call. The real run will resolve them (and pay for the ones not
+already cached).
+```
+
+That number is a useful cost signal before committing: it is the upper bound on
+how many edge-resolution calls your first real run will pay for.
 
 **Check the coverage line.** Functions over `max_function_lines` (200, in
 `experiments/configs/default.yaml`) cannot be analysed:
@@ -136,7 +156,51 @@ Each writes `experiments/datasets/my-dataset/runs/<run-name>/` containing
 `extraction.json`, `call_graph.json`, `analysis.json`.
 
 Add `--visualize` for an interactive call graph (`call_graph_annotated.html`)
-with findings overlaid — useful as a thesis figure.
+with findings overlaid — useful as a thesis figure. Forgot it? Don't re-run the
+analysis: `graph --graph-file <run>/call_graph.json --results <run>/analysis.json
+--output-dir <run>` rebuilds the same file offline, for free.
+
+### Surviving an interrupted run
+
+The analysis loop is sequential, and on a few-hundred-function repo it runs for
+a long time. Every completed function is appended to `checkpoint.jsonl` in the
+run directory as it finishes, so an interruption — Ctrl-C, a dropped
+connection, a closed laptop — costs only the function in flight:
+
+```bash
+python -m src.cli analyze --resume --run-name agentic-v1 --dataset my-dataset \
+    --path /path/to/target --config <same config> --react     # same flags as the original
+```
+
+Ctrl-C is handled rather than fatal: the partial run is saved and the summary
+prints the exact `--resume` command to continue it.
+
+Resume refuses to run against a checkpoint written by a *different* run —
+different model, mode, source, function count, or a function that has moved to
+a different index because the source changed. Silently skipping functions that
+were never analysed and calling the result complete would be worse than not
+resuming, so a mismatch is a hard error telling you to delete the checkpoint.
+
+A partial run is marked as such in `analysis.json` (`meta.partial_run`,
+`meta.functions_analysed` / `functions_total`). **Do not evaluate one as if it
+were complete** — every function it never reached scores as a miss, so recall
+reads as catastrophic rather than unfinished.
+
+### Capping spend
+
+```bash
+python -m src.cli analyze ... --react --budget-usd 5.00
+```
+
+Checked between functions, so the final total can exceed the ceiling by at most
+one function's cost. It counts *this run's* spend including edge resolution and
+anything already done in a resumed run — otherwise a resumed run would get a
+fresh budget on every restart. On reaching the ceiling the run stops, saves
+what completed, and prints the resume command.
+
+If the model is not in `PRICING`, spend is unknown and the ceiling cannot be
+enforced: the run says so once and continues without it. Treating unknown cost
+as $0 would silently make the ceiling meaningless.
 
 Per-run output now ends with a phase breakdown:
 
@@ -230,5 +294,5 @@ resolver, so a cached graph can never inflate spend.
   single highest-value thing left to do.
 - **Large functions are reported but not analysed.** Chunking was dropped;
   revisit only if the reported skip count on the real repo proves material.
-- **No budget ceiling.** `--budget-usd` needs checkpoint/resume to save a
-  partial run cleanly, which does not exist yet.
+  (On Juice Shop it is 1 function of 379 — but it is `server.ts::configureApp`,
+  which holds the route wiring and five project-marked vulnerable lines.)

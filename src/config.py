@@ -10,6 +10,8 @@ from typing import Optional
 
 import yaml
 
+from src.ingestion.extractor import SKIP_DIRS as DEFAULT_SKIP_DIRS
+
 
 @dataclass
 class LLMConfig:
@@ -21,10 +23,10 @@ class LLMConfig:
 @dataclass
 class IngestionConfig:
     max_function_lines: int = 200
-    skip_dirs: list[str] = field(default_factory=lambda: [
-        "node_modules", ".git", "__pycache__",
-        "vendor", "dist", "build",
-    ])
+    # Defaults come from the extractor so the two cannot drift apart — a config
+    # default narrower than the extractor's would silently start walking dirs
+    # (coverage/, .venv/) that were previously excluded from every dataset.
+    skip_dirs: list[str] = field(default_factory=lambda: sorted(DEFAULT_SKIP_DIRS))
 
 
 @dataclass
@@ -101,9 +103,7 @@ def load_config(path: Optional[str] = None) -> AppConfig:
         ),
         ingestion=IngestionConfig(
             max_function_lines=ing_raw.get("max_function_lines", 200),
-            skip_dirs=ing_raw.get("skip_dirs", [
-                "node_modules", ".git", "__pycache__", "vendor", "dist", "build",
-            ]),
+            skip_dirs=ing_raw.get("skip_dirs", sorted(DEFAULT_SKIP_DIRS)),
         ),
         output=OutputConfig(
             results_folder=out_raw.get("results_folder", "experiments/results"),

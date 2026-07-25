@@ -246,10 +246,34 @@ impractical: bounded parallel batches, exponential backoff on 429s, and
 checkpoint/resume so an interrupted run isn't lost. Do not build this
 speculatively.
 
+**Checkpoint/resume DONE (2026-07-25); concurrency and backoff deliberately
+still not built.** Once 6.2 landed a 379-function dataset, "an interrupted run
+isn't lost" stopped being speculative: nothing was persisted until the whole
+loop finished, so a failure at function 300 threw away 300 paid-for results.
+`src/results/checkpoint.py` appends one JSON line per completed function to
+`checkpoint.jsonl` in the run directory; `analyze --resume` continues from it
+and Ctrl-C saves the partial run instead of discarding it. A resume against a
+mismatched checkpoint (different model/mode/source/function-count, or a
+function that moved index) is a hard error — silently skipping unanalysed
+functions and calling the run complete is the one failure mode worse than
+losing the run. Sequential execution is unchanged: the fix was to stop losing
+work, not to make it faster.
+
 #### 6.5 TypeScript — only if the chosen repo needs it
 `.ts` already maps to the JavaScript grammar and parses; only type annotations
 are lost. Purely a consequence of the 6.2 dataset choice — zero work if that
 repo is plain JS. Decide after 6.2, not before.
+
+**DONE (2026-07-25) — and the premise above was wrong.** `.ts` did map to the
+JavaScript grammar, but the failure mode was not "type annotations are lost":
+on Juice Shop the JS grammar produced parse errors in 108 of 115 files and
+returned **zero functions** for 8 of them, silently. `routes/changePassword.ts`
+(a documented CWE-306 bug) was one of them — invisible to extraction, to ground
+truth, and to every coverage number. Fixed by adding `tree-sitter-typescript`
+with `Language.TYPESCRIPT`/`TSX` and their own grammars; extraction went
+339 → 379 functions, parse errors 108 → 0, and `server.ts::configureApp`
+(514 lines) became visible as an honest oversized-skip instead of vanishing
+behind a failed parse.
 
 **Explicitly out of scope** (considered and dropped, not deferred):
 - **Incremental / cached analysis** (hash-and-skip re-analysis). Beyond being
@@ -335,6 +359,13 @@ run is never misread as free.
   once running spend crosses it, warn, and save the partial run as-is. Only worth
   doing if it falls out naturally alongside Sprint 6.1's checkpoint/resume work;
   don't build it standalone.
+  **DONE (2026-07-25)**, on exactly that condition: built once 6.4's
+  checkpoint/resume existed, since "save the partial run as-is" is precisely what
+  checkpointing provides. Checked between functions (so the total can overshoot by
+  at most one function's cost); counts edge resolution and any resumed spend, so a
+  restarted run does not get a fresh budget; and if the model is missing from
+  `PRICING` the ceiling is reported as unenforceable rather than silently treating
+  unknown cost as $0.
 
 #### 7.6 Tests
 Mocked `response.usage` covering: correct capture in `analyze()`/`reason()`;

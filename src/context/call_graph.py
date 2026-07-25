@@ -61,13 +61,20 @@ class CallGraphBuilder:
         cost_ledger: Optional[CostLedger] = None,
         run_id: Optional[str] = None,
         dataset: Optional[str] = None,
+        offline_edges: bool = False,
     ):
         self.parser = TreeSitterParser()
         self.symbol_resolver = SymbolResolver()
         self.llm_resolver = LLMEdgeResolver(
             api_key, model=model, api_key_alias=api_key_alias,
             cost_ledger=cost_ledger, run_id=run_id, dataset=dataset,
+            offline=offline_edges,
         ) if api_key else None
+
+    def get_offline_misses(self) -> int:
+        """Edges left unresolved because edge resolution was offline (dry run).
+        Always 0 on a normal run."""
+        return self.llm_resolver.offline_misses if self.llm_resolver else 0
 
     def get_edge_resolution_usage(self) -> Optional[TokenUsage]:
         """Cumulative token usage spent resolving call graph edges via the LLM

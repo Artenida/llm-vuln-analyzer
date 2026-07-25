@@ -5,7 +5,7 @@ Returns a flat list of CodeSample objects ready for analysis.
 """
 import logging
 from pathlib import Path
-from typing import Union
+from typing import Iterable, Optional, Union
 
 from src.models import EXTENSION_MAP, CodeSample, Language
 from src.models.code_sample import RouteDefinition
@@ -19,6 +19,10 @@ SKIP_DIRS = {
     "node_modules", ".git", "__pycache__", "vendor",
     "dist", "build", ".next", "coverage", ".venv", "venv",
 }
+"""Default directories never walked. Overridable per dataset via
+`ingestion.skip_dirs` in the YAML config — a real repo usually carries code
+that is out of scope for the run (a bundled frontend, test suites), and
+including it silently inflates the denominator behind every coverage figure."""
 
 
 def _detect_language(path: Path) -> Language:
@@ -31,8 +35,12 @@ class CodeExtractor:
     All methods return List[CodeSample].
     """
 
-    def __init__(self, max_function_lines: int = 200):
+    def __init__(self, max_function_lines: int = 200,
+                 skip_dirs: Optional[Iterable[str]] = None):
         self.parser = TreeSitterParser(max_function_lines=max_function_lines)
+        # None means "use the defaults"; an explicit empty list means "walk
+        # everything", which is a legitimate (if unusual) request.
+        self.skip_dirs = set(SKIP_DIRS) if skip_dirs is None else set(skip_dirs)
         self._import_extractor = ImportExtractor()
         self._route_extractor = RouteExtractor()
         # Project-wide route registrations, collected across every file seen —
@@ -126,7 +134,7 @@ class CodeExtractor:
         samples: list[CodeSample] = []
         for path in sorted(root.rglob("*")):
             # skip unwanted directories
-            if any(skip in path.parts for skip in SKIP_DIRS):
+            if any(skip in path.parts for skip in self.skip_dirs):
                 continue
             if path.is_file():
                 samples.extend(self._from_file(path))

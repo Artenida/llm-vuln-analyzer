@@ -50,6 +50,13 @@ def _load_grammars() -> dict:
         logger.warning("JavaScript grammar unavailable: %s", e)
 
     try:
+        import tree_sitter_typescript as tstypescript
+        grammars["typescript"] = Language(tstypescript.language_typescript())
+        grammars["tsx"] = Language(tstypescript.language_tsx())
+    except Exception as e:
+        logger.warning("TypeScript grammar unavailable: %s", e)
+
+    try:
         import tree_sitter_c as tsc
         grammars["c"] = Language(tsc.language())
     except Exception as e:
@@ -76,14 +83,22 @@ def _get_grammars():
     return _GRAMMARS
 
 
+_JS_FUNCTION_NODE_TYPES = {
+    "function_declaration",
+    "function_expression",
+    "arrow_function",
+    "method_definition",
+}
+
 FUNCTION_NODE_TYPES = {
     "python": {"function_definition", "async_function_definition"},
-    "javascript": {
-        "function_declaration",
-        "function_expression",
-        "arrow_function",
-        "method_definition",
-    },
+    "javascript": _JS_FUNCTION_NODE_TYPES,
+    # The TypeScript grammars are supersets of the JavaScript one and use the
+    # same node names for anything with a body. `function_signature` and
+    # `method_signature` (declarations without a body, e.g. in an interface)
+    # are deliberately absent — there is no code in them to analyse.
+    "typescript": _JS_FUNCTION_NODE_TYPES,
+    "tsx": _JS_FUNCTION_NODE_TYPES,
     "c": {"function_definition"},
     "cpp": {"function_definition"},
 }
@@ -92,9 +107,14 @@ FUNCTION_NODE_TYPES = {
 CALL_NODE_TYPES = {
     "python": {"call"},
     "javascript": {"call_expression"},
+    "typescript": {"call_expression"},
+    "tsx": {"call_expression"},
     "c": {"call_expression"},
     "cpp": {"call_expression"},
 }
+
+# Languages whose naming rules follow the JavaScript branch of _extract_name.
+_JS_FAMILY = {"javascript", "typescript", "tsx"}
 
 
 def node_text(node: Node, source_bytes: bytes) -> str:
@@ -116,7 +136,7 @@ def _extract_name(node: Node, language: str,
             if child.type == "identifier":
                 return node_text(child, source_bytes)
 
-    elif language == "javascript":
+    elif language in _JS_FAMILY:
 
         # arrow_function has no name of its own — a bare `identifier` child
         # of an arrow_function is its unparenthesized single parameter
