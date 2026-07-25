@@ -37,6 +37,14 @@ class GroundTruthDataset:
     description: str
     source_path: str
     entries: list  # list[GroundTruthEntry]
+    # Present only on files scaffolded by `bootstrap-ground-truth`. A skeleton
+    # defaults every row to clean, so scoring against one before curation
+    # produces meaningless numbers rather than an obvious error.
+    curation_status: dict = field(default_factory=dict)
+
+    @property
+    def needs_curation(self) -> bool:
+        return bool(self.curation_status) and not self.curation_status.get("reviewed", False)
 
 
 def load_ground_truth(path: str | Path) -> GroundTruthDataset:
@@ -63,4 +71,5 @@ def load_ground_truth(path: str | Path) -> GroundTruthDataset:
         description=data.get("description", ""),
         source_path=data.get("source_path", ""),
         entries=entries,
+        curation_status=data.get("curation_status", {}) or {},
     )

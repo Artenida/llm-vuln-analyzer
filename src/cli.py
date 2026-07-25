@@ -8,6 +8,8 @@ Commands:
   patch      Generate + validate fixes for flagged functions in a completed run
   evaluate   Score one or more analysis runs against a ground truth dataset
   cost       Show LLM spend from the persistent cost ledger (all-time or per-run)
+  bootstrap-ground-truth
+             Scaffold a ground_truth.json covering every function in a repository
 
 Key flags:
   --react           Use ReAct agent loop (reason->act->observe) instead of single-pass
@@ -55,7 +57,8 @@ from src.llm.pricing import TokenUsage, estimate_cost
 from src.agent.react_loop import ReActAgent, MAX_STEPS
 from src.agent.tools import ToolSet
 from src.models import CodeSample
-from src.evaluation import evaluate_run, save_evaluation_report, comparison_table
+from src.evaluation import evaluate_run, save_evaluation_report, comparison_table, load_ground_truth
+from src.evaluation.bootstrap import build_ground_truth, save_ground_truth_skeleton
 
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 
@@ -884,6 +887,20 @@ def evaluate(
         typer.echo(f"Ground truth file not found: {gtp}", err=True)
         raise typer.Exit(1)
 
+    # A bootstrap skeleton defaults every row to clean — scoring against one
+    # yields plausible-looking but meaningless numbers, so say so loudly.
+    _gt_probe = load_ground_truth(gtp)
+    if _gt_probe.needs_curation:
+        cs = _gt_probe.curation_status
+        typer.echo(
+            f"\n!! WARNING: {gtp.name} is an UNCURATED skeleton "
+            f"(curation_status.reviewed is false).\n"
+            f"   {cs.get('functions_unreviewed', '?')} row(s) are defaulted to clean and "
+            f"{cs.get('functions_prefilled_vulnerable', '?')} are unconfirmed.\n"
+            f"   Metrics computed from it are NOT valid — curate it first.\n",
+            err=True,
+        )
+
     reports_and_gt = []
 
     for results_file in results:
@@ -944,6 +961,108 @@ def evaluate(
         typer.echo(f"\n{'-' * 60}")
         typer.echo("Comparison across runs:\n")
         typer.echo(comparison_table(reports_and_gt))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bootstrap-ground-truth — scaffold a ground_truth.json for a real repository
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command("bootstrap-ground-truth")
+def bootstrap_ground_truth(
+    path: str = typer.Option(
+        ..., "--path", "-p", help="Repository to scaffold ground truth for."
+    ),
+    dataset: str = typer.Option(
+        ..., "--dataset", "-d",
+        help="Dataset name — output goes to experiments/datasets/<name>/ground_truth.json."
+    ),
+    fix_commit: List[str] = typer.Option(
+        None, "--fix-commit",
+        help="SHA of a vulnerability-fixing commit; functions it touches are pre-marked "
+             "vulnerable for review. Repeatable. Requires --path to be a git checkout of "
+             "the VULNERABLE (pre-fix) state."
+    ),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o", help="Override the output path."
+    ),
+    description: Optional[str] = typer.Option(
+        None, "--description", help="Dataset description recorded in the file."
+    ),
+    config_path: Optional[str] = typer.Option(
+        None, "--config", "-c", help="Path to YAML config file."
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Overwrite an existing ground_truth.json. Destroys hand-curated labels."
+    ),
+):
+    """
+    Generate a ground_truth.json skeleton covering EVERY function in a repository.
+
+    `evaluate` only counts a false positive when a clean function has a ground
+    truth row — findings with no row are excluded from the confusion matrix — so
+    precision cannot be computed unless clean functions are labelled too. This
+    emits all of them defaulted to vulnerable=false for you to curate, rather
+    than leaving you to transcribe hundreds of rows by hand.
+    """
+    repo = Path(path)
+    if not repo.exists():
+        typer.echo(f"Path does not exist: {repo}", err=True)
+        raise typer.Exit(1)
+
+    config = load_config(config_path)
+    extractor = CodeExtractor(max_function_lines=config.ingestion.max_function_lines)
+
+    typer.echo(f"\nExtracting functions from {repo} ...")
+    samples = extractor.from_path(str(repo))
+    if not samples:
+        typer.echo("No functions extracted — nothing to scaffold.", err=True)
+        raise typer.Exit(1)
+
+    skipped = extractor.skipped_functions
+    payload = build_ground_truth(
+        samples=samples,
+        skipped=skipped,
+        repo_root=repo,
+        dataset=dataset,
+        source_path=str(path),
+        fix_commits=list(fix_commit or []),
+        description=description or "",
+    )
+
+    out_path = Path(output) if output else Path(
+        f"experiments/datasets/{dataset}/ground_truth.json"
+    )
+
+    try:
+        saved = save_ground_truth_skeleton(payload, out_path, force=force)
+    except FileExistsError as e:
+        typer.echo(f"\n{e}", err=True)
+        raise typer.Exit(1)
+
+    cur = payload["curation_status"]
+    cov = payload["coverage"]
+
+    typer.echo(f"\nGround truth skeleton → {saved}")
+    typer.echo(f"  Functions            : {payload['summary']['total_functions']}")
+    typer.echo(f"  Pre-marked vulnerable: {cur['functions_prefilled_vulnerable']} (from {len(cur['fix_commits'])} fix commit(s))")
+    typer.echo(f"  Unreviewed (clean)   : {cur['functions_unreviewed']}")
+    if cov["functions_skipped_oversized"]:
+        typer.echo(
+            f"  Skipped oversized    : {cov['functions_skipped_oversized']} "
+            f"— outside all metrics ({cov['coverage']:.1%} coverage)"
+        )
+
+    typer.echo(
+        "\nNEXT: curate the file before evaluating.\n"
+        "  1. Confirm each 'REVIEW REQUIRED' row is genuinely the vulnerability\n"
+        "     (fix commits also carry refactoring and tests).\n"
+        "  2. Set cwe_id + severity on every vulnerable row — both are left null here\n"
+        "     deliberately; guessing them would corrupt the CWE-accuracy metric.\n"
+        "  3. Spot-check the UNREVIEWED rows; any left mislabelled becomes a\n"
+        "     false positive against the analyzer.\n"
+        "  4. Set curation_status.reviewed = true when done."
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
