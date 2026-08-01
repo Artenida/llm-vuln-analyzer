@@ -1,0 +1,79 @@
+/*
+ * Design tokens. See docs/frontend-plan.md §3.2.
+ *
+ * This is the ONLY file allowed to contain a raw colour value. Every component
+ * references a token, so a light theme is a matter of overriding these names
+ * under :root[data-theme="light"] — hard-coding a hex anywhere else makes that
+ * flip impossible.
+ */
+
+:root {
+  /* Surfaces — cool near-black, four steps of elevation */
+  --bg: #0b0e14;
+  --surface: #11151f;
+  --surface-2: #171c28;
+  --surface-3: #1e2534;
+  --border: #232a38;
+  --border-soft: #1a2030;
+
+  /* Text */
+  --text: #e4e8f0;
+  --text-dim: #8a93a6;
+  --text-faint: #5c6479;
+
+  /* Accent — steel blue, matching the call graph's entry-point node colour */
+  --accent: #4c8dff;
+  --accent-dim: #2e5fb0;
+  --accent-wash: rgba(76, 141, 255, 0.12);
+  --accent-text: #0b0e14;
+
+  /* Severity — the only place saturated colour is spent */
+  --sev-critical: #e5484d;
+  --sev-high: #f76b15;
+  --sev-medium: #e2a336;
+  --sev-low: #3e9b8f;
+  --sev-none: #6b7486;
+
+  /* Evaluation outcomes and status */
+  --ok: #3fb950;
+  --warn: #d29922;
+  --err: #e5484d;
+  --muted: #6b7486;
+
+  /* Type */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Code", "SF Mono",
+    Consolas, "Liberation Mono", monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 19px;
+  --fs-2xl: 26px;
+
+  --lh-tight: 1.25;
+  --lh-normal: 1.55;
+
+  /* Space — 4px base */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* Radius and elevation */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* Layout */
+  --sidebar-w: 232px;
+  --topbar-h: 48px;
+  --content-max: 1440px;
+}

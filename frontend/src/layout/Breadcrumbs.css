@@ -1,0 +1,39 @@
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.crumbs a {
+  color: var(--text-dim);
+}
+
+.crumbs a:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.crumbs__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.crumbs__sep {
+  color: var(--text-faint);
+  opacity: 0.6;
+}
+
+.crumbs__current {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -1,0 +1,36 @@
+.results__graph {
+  display: block;
+  width: 100%;
+  height: 620px;
+  border: none;
+  background: var(--bg);
+}
+
+.results__file {
+  display: inline-block;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  /* Paths are most identifiable at the end, so clip from the left. */
+  direction: rtl;
+  text-align: left;
+}
+
+.results__h4 {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 0 var(--s2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+.results__metanote {
+  margin: var(--s4) 0 var(--s2);
+  font-size: var(--fs-xs);
+}

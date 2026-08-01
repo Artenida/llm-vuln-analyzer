@@ -17,6 +17,17 @@ data/rag_corpus/embeddings/
 # Experiments — local only, never committed
 experiments/
 
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Web UI local state (settings, result-directory registry, run history)
+.vulnui/
+
+# Default output directory for analyses run from the UI
+results/
+
 # Editors
 .vscode/
 .idea/

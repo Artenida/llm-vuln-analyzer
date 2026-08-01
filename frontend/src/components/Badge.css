@@ -1,0 +1,53 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 1px var(--s2);
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  /* Severity tints are washes of the same hue as the text, so a table of
+     badges reads as one system rather than a row of solid blocks. */
+  background: color-mix(in srgb, var(--badge-color) 16%, transparent);
+  border-color: color-mix(in srgb, var(--badge-color) 34%, transparent);
+  color: var(--badge-color);
+}
+
+.badge--subtle {
+  background: transparent;
+}
+
+.badge--neutral {
+  --badge-color: var(--text-dim);
+}
+.badge--accent {
+  --badge-color: var(--accent);
+}
+.badge--ok {
+  --badge-color: var(--ok);
+}
+.badge--warn {
+  --badge-color: var(--warn);
+}
+.badge--err {
+  --badge-color: var(--err);
+}
+.badge--critical {
+  --badge-color: var(--sev-critical);
+}
+.badge--high {
+  --badge-color: var(--sev-high);
+}
+.badge--medium {
+  --badge-color: var(--sev-medium);
+}
+.badge--low {
+  --badge-color: var(--sev-low);
+}
+.badge--none {
+  --badge-color: var(--sev-none);
+}

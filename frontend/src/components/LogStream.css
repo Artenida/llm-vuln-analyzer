@@ -1,0 +1,64 @@
+.log {
+  position: relative;
+}
+
+.log__body {
+  overflow-y: auto;
+  padding: var(--s3);
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.log__line {
+  color: var(--text-dim);
+}
+
+.log--head {
+  color: var(--text);
+}
+
+.log--progress {
+  color: var(--text-dim);
+}
+
+.log--vuln {
+  color: var(--sev-high);
+}
+
+.log--clean {
+  color: var(--ok);
+  opacity: 0.75;
+}
+
+.log--error {
+  color: var(--err);
+}
+
+.log--warn {
+  color: var(--warn);
+}
+
+.log__empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.log__follow {
+  position: absolute;
+  right: var(--s3);
+  bottom: var(--s3);
+  padding: var(--s1) var(--s3);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: var(--fs-xs);
+  box-shadow: var(--shadow-1);
+}

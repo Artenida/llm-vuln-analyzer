@@ -1,0 +1,73 @@
+.runcell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.runcell__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.runcell__note {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.prose {
+  max-width: 90ch;
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+  color: var(--text-dim);
+}
+
+.prose strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* A curator's note that carries a caveat about the numbers — visually marked
+   so it is never skimmed past when reading the metrics beside it. */
+.note {
+  border-left: 2px solid var(--warn);
+  padding: var(--s2) var(--s3);
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+
+/* Structured curator fields, shown verbatim rather than reshaped. */
+.rawblock {
+  margin: 0;
+  padding: var(--s3);
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Footnote under a table — usually "the deeper view lands in Sprint N". */
+.tablefoot {
+  padding: var(--s2) var(--s4);
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-2);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.note__label {
+  display: block;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--warn);
+  margin-bottom: var(--s1);
+}

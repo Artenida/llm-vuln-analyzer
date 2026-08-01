@@ -426,6 +426,31 @@ with no way to total spend across runs)
 
 ---
 
+## Sprints 8–13 — Web UI
+
+A separate workstream, planned in its own document:
+**[`docs/frontend-plan.md`](frontend-plan.md)** — design system, information
+architecture, API contract and the sprint breakdown (8 foundations · 9 run
+detail · 10 evaluation & comparison · 11 cost & patches · 12 launching runs ·
+13 polish).
+
+Sprints 8–11 are complete: `python -m src.cli ui` serves a browser UI where you
+pick a folder, run an analysis, and read the results — findings, the interactive
+call graph, coverage, cost, and generated patches. Built from `src/web/`
+(FastAPI) and `frontend/` (React SPA).
+
+The web layer runs the CLI as a subprocess rather than re-implementing it, and
+reads cost from `src/llm/cost_ledger.py`, so a run started in the browser is
+identical to one started in a terminal and the UI cannot quote a figure the CLI
+would disagree with.
+
+**One engine change came out of this work:** `analyze --output-dir <dir>`, so a
+run's artifacts can be written anywhere rather than only under `experiments/`.
+`--run-name`/`--dataset` are unchanged. A Windows cancellation bug was also
+fixed — see `frontend-plan.md` §7, Sprint 9.
+
+---
+
 ## Backlog (Unscheduled)
 
 | Item | Notes |
@@ -450,3 +475,4 @@ with no way to total spend across runs)
 | 5 | `docs/evaluation.md` — automated precision/recall/F1 harness, matching rules |
 | 6 | `docs/real-world-evaluation.md` — dataset selection & ground-truth derivation, coverage reporting, results |
 | 7 | `docs/cost-tracking.md` — pricing table, per-step ReAct cost summation, cost-vs-accuracy comparison |
+| 8–13 | `docs/frontend-plan.md` — web UI design system, information architecture, API contract, sprint breakdown |

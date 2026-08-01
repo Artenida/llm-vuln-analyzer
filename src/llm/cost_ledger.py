@@ -139,6 +139,11 @@ class CostLedger:
             return self._query("api_key_alias", "WHERE run_id = ?", (run_id,))
         return self._query("api_key_alias", "", ())
 
+    def by_model(self, run_id: Optional[str] = None) -> list[CostSummaryRow]:
+        if run_id:
+            return self._query("model", "WHERE run_id = ?", (run_id,))
+        return self._query("model", "", ())
+
     def by_run(self, limit: int = 20) -> list[CostSummaryRow]:
         """Most-recently-active run first. Ordered by each run's latest event
         timestamp, not by run_id — run_id embeds the model name before the

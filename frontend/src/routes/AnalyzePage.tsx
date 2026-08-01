@@ -1,0 +1,615 @@
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  useActiveJob,
+  useCancelJob,
+  useEstimate,
+  useInspect,
+  useJob,
+  useSettings,
+  useStartAnalyze,
+} from "@/api/hooks";
+import type { CostEstimate, InspectResult } from "@/api/types";
+import {
+  Badge,
+  Button,
+  Card,
+  DirectoryPicker,
+  Field,
+  LogStream,
+  NumberInput,
+  Select,
+  StatTile,
+  TextInput,
+  Toggle,
+} from "@/components";
+import { useJobStream } from "@/lib/useJobStream";
+import { useAnalyzeForm } from "@/state/AnalyzeForm";
+import type { AnalyzeMode } from "@/state/AnalyzeForm";
+import { formatCost, formatNumber } from "@/lib/format";
+import "./AnalyzePage.css";
+
+type Mode = AnalyzeMode;
+
+export function AnalyzePage() {
+  const navigate = useNavigate();
+  const { data: settingsData } = useSettings();
+  const settings = settingsData?.settings;
+
+  // Held above the router so navigating away and back does not clear the form.
+  const { form, update, reset } = useAnalyzeForm();
+  const {
+    sourcePath, outputDir, mode, visualize, dryRun, resume, budget,
+    inspection, estimate, jobId,
+  } = form;
+
+  // Genuinely transient — a half-open dialog should not survive navigation.
+  const [picking, setPicking] = useState<"source" | "output" | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const inspect = useInspect();
+  const estimateMutation = useEstimate();
+  const startAnalyze = useStartAnalyze();
+  const cancelJob = useCancelJob();
+  const { data: activeJob } = useActiveJob();
+  const { data: fetchedJob, error: jobError } = useJob(jobId);
+  const stream = useJobStream(jobId);
+
+  // Jobs live in the server's memory. If it restarted since, the remembered id
+  // is gone — drop it rather than leaving a dead progress panel on the page.
+  useEffect(() => {
+    if (jobError) update({ jobId: null });
+  }, [jobError, update]);
+
+  // Settings supply the defaults exactly once. Re-applying them on every mount
+  // would overwrite your own choices each time you came back to this page.
+  useEffect(() => {
+    if (!settings || form.seededFromSettings) return;
+    update({
+      mode: settings.react ? "react" : "semantic",
+      visualize: settings.visualize,
+      budget: settings.budget_usd,
+      seededFromSettings: true,
+    });
+  }, [settings, form.seededFromSettings, update]);
+
+  // A run started before this page was opened (or still going after a refresh)
+  // is adopted rather than hidden — otherwise the UI would happily offer to
+  // start a second one and be refused by the single-flight guard.
+  useEffect(() => {
+    if (!jobId && activeJob && activeJob.kind === "analyze") update({ jobId: activeJob.id });
+  }, [activeJob, jobId, update]);
+
+  // Three sources, most-live first: the SSE stream, then a direct fetch of the
+  // remembered job, then the active-job poll. The fetch is what stops a
+  // finished run from flashing as "Running…" when you navigate back here.
+  const job =
+    stream.job ?? fetchedJob ?? (activeJob?.id === jobId ? activeJob : null);
+  const running = job?.state === "running";
+  const finished = job !== null && job.state !== "running";
+
+  const keyConfigured = settingsData?.api_keys.some(
+    (k) => k.alias === (settings?.api_key_alias ?? "default") && k.configured,
+  );
+
+  async function onInspect(path: string) {
+    update({ estimate: null });
+    const result = await inspect.mutateAsync(path);
+    update({ inspection: result });
+    if (result.functions) {
+      update({
+        estimate: await estimateMutation.mutateAsync({
+          functions: result.functions,
+          react: mode === "react",
+        }),
+      });
+    }
+  }
+
+  // Re-price when the mode changes: agentic costs several calls per function,
+  // so a semantic estimate shown next to an agentic run would be badly wrong.
+  useEffect(() => {
+    if (!inspection?.functions) return;
+    void estimateMutation
+      .mutateAsync({ functions: inspection.functions, react: mode === "react" })
+      .then((next) => update({ estimate: next }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, inspection?.functions]);
+
+  async function launch() {
+    setConfirming(false);
+    const created = await startAnalyze.mutateAsync({
+      source_path: sourcePath,
+      output_dir: outputDir || undefined,
+      react: mode === "react",
+      visualize,
+      dry_run: dryRun,
+      resume,
+      budget_usd: dryRun ? null : budget,
+    });
+    // The server may have auto-named the folder — show where results are going.
+    update({ jobId: created.id, outputDir: created.output_dir ?? outputDir });
+  }
+
+  const canStart =
+    sourcePath.trim().length > 0 &&
+    !running &&
+    (dryRun || keyConfigured) &&
+    (inspection === null || inspection.exists);
+
+  return (
+    <div className="stack">
+      <div className="page-title">
+        <h1>Analyze</h1>
+        <span className="page-subtitle">
+          Point the analyzer at a folder and run it.
+        </span>
+      </div>
+
+      {settingsData && !keyConfigured && (
+        <div className="note">
+          <span className="note__label">No API key</span>
+          Analysis makes OpenAI calls and no key is configured. Add one in{" "}
+          <a href="/settings">Settings</a>, or tick <strong>Dry run</strong> below
+          to build the call graph without spending anything.
+        </div>
+      )}
+
+      <div className="analyze__grid">
+        <div className="stack">
+          <Card title="Target">
+            <div className="stack">
+              <Field
+                label="Folder to analyse"
+                hint="A project directory, or a single source file."
+              >
+                <div className="analyze__pathrow">
+                  <TextInput
+                    value={sourcePath}
+                    onChange={(value) => update({ sourcePath: value })}
+                    placeholder="C:\path\to\project"
+                    disabled={running}
+                  />
+                  <Button onClick={() => setPicking("source")} disabled={running}>
+                    Browse…
+                  </Button>
+                  <Button
+                    onClick={() => void onInspect(sourcePath)}
+                    disabled={!sourcePath.trim() || inspect.isPending || running}
+                  >
+                    {inspect.isPending ? "Scanning…" : "Scan"}
+                  </Button>
+                </div>
+              </Field>
+
+              {inspection && <InspectionPanel inspection={inspection} />}
+
+              <Field
+                label="Save results to"
+                hint="Leave empty to use a timestamped folder under your results directory."
+              >
+                <div className="analyze__pathrow">
+                  <TextInput
+                    value={outputDir}
+                    onChange={(value) => update({ outputDir: value })}
+                    placeholder={settings?.results_root ?? "(default)"}
+                    disabled={running}
+                  />
+                  <Button onClick={() => setPicking("output")} disabled={running}>
+                    Browse…
+                  </Button>
+                </div>
+              </Field>
+            </div>
+          </Card>
+
+          <Card title="Options">
+            <div className="analyze__options">
+              <Field label="Analysis mode" hint={MODE_HINT[mode]}>
+                <Select
+                  value={mode}
+                  onChange={(value) => update({ mode: value })}
+                  options={[
+                    { value: "react", label: "Agentic — ReAct loop" },
+                    { value: "semantic", label: "Semantic — call graph context" },
+                  ]}
+                />
+              </Field>
+
+              <Field
+                label="Budget (USD)"
+                hint="Stops starting new functions once spend reaches this. Checked between functions."
+              >
+                <NumberInput
+                  value={budget}
+                  onChange={(value) => update({ budget: value })}
+                  min={0}
+                  step={0.5}
+                  placeholder="no ceiling"
+                />
+              </Field>
+
+              <div className="analyze__toggles">
+                <Toggle
+                  checked={visualize}
+                  onChange={(value) => update({ visualize: value })}
+                  label="Build the call graph view"
+                  hint="Interactive HTML graph, with findings overlaid."
+                  disabled={running}
+                />
+                <Toggle
+                  checked={dryRun}
+                  onChange={(value) => update({ dryRun: value })}
+                  label="Dry run"
+                  hint="Extract and build the graph only. Makes no API calls and costs nothing."
+                  disabled={running}
+                />
+                <Toggle
+                  checked={resume}
+                  onChange={(value) => update({ resume: value })}
+                  label="Resume"
+                  hint="Continue an interrupted run in the output folder above."
+                  disabled={running}
+                />
+              </div>
+            </div>
+          </Card>
+
+          {startAnalyze.error && (
+            <div className="note note--error">
+              <span className="note__label">Could not start</span>
+              {(startAnalyze.error as Error).message}
+            </div>
+          )}
+
+          <div className="analyze__actions">
+            <Button
+              variant="primary"
+              disabled={!canStart}
+              onClick={() => (dryRun ? void launch() : setConfirming(true))}
+            >
+              {running ? "Running…" : dryRun ? "Run dry scan" : "Analyze"}
+            </Button>
+            {running && job && (
+              <Button variant="danger" onClick={() => cancelJob.mutate(job.id)}>
+                Cancel
+              </Button>
+            )}
+            {finished && job?.output_dir && (
+              <Button
+                variant="primary"
+                onClick={() =>
+                  navigate(`/results?path=${encodeURIComponent(job.output_dir!)}`)
+                }
+              >
+                Open results →
+              </Button>
+            )}
+            {/* The form is remembered across navigation and restarts, so there
+                has to be a way to deliberately empty it. */}
+            {!running && (sourcePath || outputDir || inspection) && (
+              <Button variant="ghost" onClick={reset} title="Empty this form">
+                Clear
+              </Button>
+            )}
+          </div>
+        </div>
+
+        <div className="stack">
+          <Card
+            title="Cost estimate"
+            description="Projected from measured spend on previous runs."
+          >
+            <EstimatePanel estimate={estimate} dryRun={dryRun} />
+          </Card>
+
+          {(running || finished) && job && (
+            <Card
+              title="Progress"
+              actions={<StateBadge state={job.state} />}
+              description={job.command}
+            >
+              {/* The job record is the fallback for every counter: the SSE
+                  replay after a reconnect carries log lines only. */}
+              <ProgressPanel
+                current={Math.max(stream.current, job.current)}
+                total={Math.max(stream.total, job.total)}
+                currentFunction={stream.currentFunction}
+                findings={Math.max(stream.findings, job.findings)}
+                state={job.state}
+                error={job.error}
+                outputDir={job.output_dir}
+                onOpenResults={() =>
+                  job.output_dir &&
+                  navigate(`/results?path=${encodeURIComponent(job.output_dir)}`)
+                }
+              />
+            </Card>
+          )}
+        </div>
+      </div>
+
+      {(running || finished) && (
+        <Card title="Output" description="Exactly what the analyzer prints on the terminal.">
+          <LogStream lines={stream.lines} height={360} />
+        </Card>
+      )}
+
+      {picking && (
+        <DirectoryPicker
+          title={picking === "source" ? "Select a folder to analyse" : "Select an output folder"}
+          initialPath={picking === "source" ? sourcePath || null : outputDir || settings?.results_root}
+          allowCreate={picking === "output"}
+          onCancel={() => setPicking(null)}
+          onPick={(path) => {
+            if (picking === "source") {
+              update({ sourcePath: path });
+              void onInspect(path);
+            } else {
+              update({ outputDir: path });
+            }
+            setPicking(null);
+          }}
+        />
+      )}
+
+      {confirming && (
+        <ConfirmDialog
+          sourcePath={sourcePath}
+          outputDir={outputDir || `${settings?.results_root ?? ""} (auto-named)`}
+          mode={mode}
+          budget={budget}
+          estimate={estimate}
+          functions={inspection?.functions ?? null}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => void launch()}
+        />
+      )}
+    </div>
+  );
+}
+
+const MODE_HINT: Record<Mode, string> = {
+  react:
+    "The agent queries the call graph before each verdict. Most accurate, and several API calls per function.",
+  semantic:
+    "One pass per function with callers, callees and taint flags injected into the prompt. Cheaper.",
+};
+
+function InspectionPanel({ inspection }: { inspection: InspectResult }) {
+  if (!inspection.exists) {
+    return (
+      <div className="note note--error">
+        <span className="note__label">Not found</span>
+        {inspection.note ?? "That path does not exist."}
+      </div>
+    );
+  }
+
+  return (
+    <div className="analyze__inspect">
+      <div className="grid-stats">
+        <StatTile label="Source files" value={formatNumber(inspection.source_files)} />
+        <StatTile
+          label="Functions"
+          value={inspection.functions !== null ? formatNumber(inspection.functions) : "—"}
+          tone="accent"
+          hint={inspection.scanned ? "will be analysed" : "not counted"}
+        />
+        <StatTile
+          label="Skipped"
+          value={
+            inspection.functions_skipped !== null
+              ? formatNumber(inspection.functions_skipped)
+              : "—"
+          }
+          tone={inspection.functions_skipped ? "warn" : "muted"}
+          hint="over the line limit"
+        />
+      </div>
+      <div className="row wrap" style={{ marginTop: "var(--s3)" }}>
+        {Object.entries(inspection.languages).map(([language, count]) => (
+          <Badge key={language} variant="neutral" subtle>
+            {language} <span className="faint">{count}</span>
+          </Badge>
+        ))}
+      </div>
+      {inspection.note && <p className="analyze__note">{inspection.note}</p>}
+    </div>
+  );
+}
+
+function EstimatePanel({
+  estimate,
+  dryRun,
+}: {
+  estimate: CostEstimate | null;
+  dryRun: boolean;
+}) {
+  if (dryRun) {
+    return (
+      <p className="dim">
+        A dry run makes no API calls. Edge resolution runs cache-only, so it
+        costs <strong>nothing</strong>.
+      </p>
+    );
+  }
+  if (!estimate) {
+    return <p className="faint">Scan a folder to see a projected cost.</p>;
+  }
+  if (!estimate.known) {
+    // Never invent a rate on the screen that asks you to authorise spending.
+    return (
+      <p className="dim">
+        No estimate available — {estimate.reason}
+      </p>
+    );
+  }
+  return (
+    <div className="stack-sm">
+      <StatTile
+        label="Projected cost"
+        value={formatCost(estimate.estimate_usd)}
+        tone="accent"
+        hint={`${formatNumber(estimate.functions)} functions × ${formatCost(estimate.per_function_usd)}`}
+      />
+      <p className="faint" style={{ fontSize: "var(--fs-xs)" }}>
+        Based on {formatNumber(estimate.based_on_functions)} functions previously
+        analysed in this mode. {estimate.note}
+      </p>
+    </div>
+  );
+}
+
+function ProgressPanel({
+  current,
+  total,
+  currentFunction,
+  findings,
+  state,
+  error,
+  outputDir,
+  onOpenResults,
+}: {
+  current: number;
+  total: number;
+  currentFunction: string | null;
+  findings: number;
+  state: string;
+  error: string | null;
+  outputDir: string | null;
+  onOpenResults: () => void;
+}) {
+  const done = state !== "running";
+  // A finished run fills the bar even when no per-function counter was ever
+  // parsed — a dry run has no analysis loop, so it legitimately prints none,
+  // and leaving the bar empty next to "succeeded" reads as a failure.
+  const percent =
+    total > 0 ? Math.round((current / total) * 100) : done ? 100 : 0;
+
+  const label =
+    total > 0
+      ? `${current} / ${total} functions`
+      : state === "succeeded"
+        ? "complete"
+        : done
+          ? state
+          : "starting…";
+
+  return (
+    <div className="stack-sm">
+      <div className="analyze__progress">
+        <div
+          className={
+            state === "succeeded"
+              ? "analyze__progress-fill analyze__progress-fill--done"
+              : "analyze__progress-fill"
+          }
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      <div className="row-between">
+        <span className="mono">
+          {label}
+          {!done && currentFunction && (
+            <span className="faint"> · {currentFunction}</span>
+          )}
+        </span>
+        <span className="num">
+          {findings > 0 ? (
+            <span style={{ color: "var(--sev-high)" }}>{findings} flagged</span>
+          ) : (
+            <span className="faint">0 flagged</span>
+          )}
+        </span>
+      </div>
+
+      {error && (
+        <div className="note note--error">
+          <span className="note__label">{state}</span>
+          {error}
+        </div>
+      )}
+
+      {state === "succeeded" && outputDir && (
+        <Button variant="primary" onClick={onOpenResults}>
+          View results →
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function StateBadge({ state }: { state: string }) {
+  const variant =
+    state === "running" ? "accent"
+    : state === "succeeded" ? "ok"
+    : state === "cancelled" ? "warn"
+    : "err";
+  return <Badge variant={variant}>{state}</Badge>;
+}
+
+function ConfirmDialog({
+  sourcePath,
+  outputDir,
+  mode,
+  budget,
+  estimate,
+  functions,
+  onCancel,
+  onConfirm,
+}: {
+  sourcePath: string;
+  outputDir: string;
+  mode: Mode;
+  budget: number | null;
+  estimate: CostEstimate | null;
+  functions: number | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="confirm" role="dialog" aria-modal="true">
+      <div className="confirm__backdrop" onClick={onCancel} />
+      <div className="confirm__panel">
+        <h3>Start this analysis?</h3>
+        <p className="dim">This makes paid OpenAI API calls.</p>
+
+        <dl className="kv">
+          <dt>Folder</dt>
+          <dd>{sourcePath}</dd>
+          <dt>Results to</dt>
+          <dd>{outputDir}</dd>
+          <dt>Mode</dt>
+          <dd>{mode === "react" ? "agentic (ReAct)" : "semantic (call graph)"}</dd>
+          <dt>Functions</dt>
+          <dd>{functions !== null ? formatNumber(functions) : "unknown"}</dd>
+          <dt>Projected cost</dt>
+          <dd>
+            {estimate?.known ? formatCost(estimate.estimate_usd) : "unknown"}
+          </dd>
+          <dt>Budget ceiling</dt>
+          <dd>{budget !== null ? formatCost(budget) : "none"}</dd>
+        </dl>
+
+        {budget === null && (
+          <div className="note" style={{ marginTop: "var(--s3)" }}>
+            <span className="note__label">No ceiling set</span>
+            Without a budget the run continues until every function is analysed.
+            You can still cancel at any point, and the work already paid for is
+            saved.
+          </div>
+        )}
+
+        <div className="confirm__actions">
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={onConfirm}>
+            Start analysis
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}

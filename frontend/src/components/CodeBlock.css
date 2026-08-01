@@ -1,0 +1,83 @@
+.code {
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+
+.code__table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.code__row--flagged {
+  /* The whole row is tinted rather than just the gutter — a flagged line has to
+     be findable while scrolling past a 200-line function. */
+  background: color-mix(in srgb, var(--sev-high) 14%, transparent);
+}
+
+.code__gutter {
+  width: 1%;
+  padding: 0 var(--s3) 0 var(--s3);
+  text-align: right;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  white-space: nowrap;
+  border-right: 1px solid var(--border-soft);
+}
+
+.code__row--flagged .code__gutter {
+  color: var(--sev-high);
+  border-right-color: var(--sev-high);
+}
+
+.code__line {
+  padding: 0 var(--s3);
+  white-space: pre;
+  color: var(--text);
+}
+
+/* ── diff ────────────────────────────────────────────────────────────────── */
+
+.diff {
+  padding: var(--s2) 0;
+}
+
+.diff__line {
+  padding: 0 var(--s3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+}
+
+.diff--file {
+  color: var(--text-faint);
+}
+
+.diff--hunk {
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.diff--add {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+
+.diff--del {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+/* ── json ────────────────────────────────────────────────────────────────── */
+
+.json {
+  margin: 0;
+  padding: var(--s3);
+  color: var(--text-dim);
+  white-space: pre;
+}

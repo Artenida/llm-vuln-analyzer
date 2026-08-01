@@ -1,0 +1,112 @@
+.filterbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+
+.filterbar__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 200px;
+  flex: 0 1 280px;
+}
+
+.filterbar__icon {
+  position: absolute;
+  left: var(--s2);
+  color: var(--text-faint);
+  font-size: var(--fs-md);
+  pointer-events: none;
+}
+
+.filterbar__search input {
+  width: 100%;
+  padding: var(--s1) var(--s2) var(--s1) var(--s5);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+
+.filterbar__search input::placeholder {
+  color: var(--text-faint);
+}
+
+.filterbar__search input:focus {
+  border-color: var(--accent-dim);
+}
+
+/* Chrome renders a clear button that clashes with the dark field. */
+.filterbar__search input::-webkit-search-cancel-button {
+  filter: invert(0.6);
+}
+
+.filterbar__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 2px var(--s2);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.chip:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+
+.chip--active {
+  background: var(--accent-wash);
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.chip__count {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.chip--active .chip__count {
+  color: var(--accent);
+}
+
+.filterbar__spacer {
+  flex: 1 1 auto;
+}
+
+.filterbar__count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.filterbar__reset {
+  padding: 2px var(--s2);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.filterbar__reset:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}

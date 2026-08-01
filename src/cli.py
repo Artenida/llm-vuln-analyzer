@@ -8,6 +8,7 @@ Commands:
   patch      Generate + validate fixes for flagged functions in a completed run
   evaluate   Score one or more analysis runs against a ground truth dataset
   cost       Show LLM spend from the persistent cost ledger (all-time or per-run)
+  ui         Serve the web UI: pick a folder, analyse it, read the results
   bootstrap-ground-truth
              Scaffold a ground_truth.json covering every function in a repository
 
@@ -41,6 +42,28 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass  # not a reconfigurable text stream (pytest capture, a pipe, ...)
+
+# Windows: make a CTRL_BREAK from a parent process behave like Ctrl-C.
+#
+# The web UI's job runner cancels a run by sending CTRL_BREAK_EVENT — with
+# CREATE_NEW_PROCESS_GROUP, Windows disables CTRL_C_EVENT for the child, so
+# CTRL_BREAK is the only signal that can reach it. But Python's default SIGBREAK
+# handler terminates the process outright (exit 0xC000013A), which would skip
+# the KeyboardInterrupt path in `analyze` that saves the partial run — throwing
+# away every function already analysed and paid for. Mapping it to
+# KeyboardInterrupt is what makes "cancel keeps your results" true.
+import os as _os
+
+if _os.name == "nt":
+    import signal as _signal
+
+    def _raise_keyboard_interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+
+    try:
+        _signal.signal(_signal.SIGBREAK, _raise_keyboard_interrupt)
+    except (AttributeError, ValueError):
+        pass  # no SIGBREAK, or not on the main thread
 
 # Load .env automatically so users don't have to export env vars manually
 try:
@@ -147,6 +170,12 @@ def analyze(
         help="Test dataset this run belongs to (e.g. nodegoat, auth-service) — matches "
              "experiments/datasets/<dataset>/ground_truth.json. Only used together with --run-name."
     ),
+    output_dir: Optional[str] = typer.Option(
+        None, "--output-dir", "-o",
+        help="Write every artifact of this run (extraction.json, call_graph.json, "
+             "analysis.json, checkpoint.jsonl, graph HTML/DOT) into this directory. "
+             "Takes precedence over --run-name/--dataset."
+    ),
     api_key_alias: Optional[str] = typer.Option(
         None, "--api-key-alias",
         help="Which API key to use, for setups with more than one key for the same "
@@ -166,12 +195,22 @@ def analyze(
     ledger = CostLedger()
     run_id = make_run_id(config.llm.model)
 
-    # ── named run: redirect all outputs to experiments/datasets/<dataset>/runs/<name>/ ──
-    if run_name:
+    # ── where this run's artifacts go ─────────────────────────────────────────
+    # --output-dir writes anywhere the caller wants; --run-name keeps the
+    # dataset-scoped layout the thesis experiments use. Either way every
+    # artifact lands in one directory under fixed names, so a run folder is
+    # self-describing regardless of how it was produced.
+    run_dir = None
+    if output_dir:
+        run_dir = output_dir
+    elif run_name:
         run_dir = (
             f"experiments/datasets/{dataset}/runs/{run_name}"
             if dataset else f"experiments/runs/{run_name}"
         )
+
+    if run_dir:
+        Path(run_dir).mkdir(parents=True, exist_ok=True)
         config.output.extraction_folder = run_dir
         config.output.context_folder    = run_dir
         config.output.analysis_folder   = run_dir
@@ -223,7 +262,7 @@ def analyze(
         samples=samples,
         source_path=source_label,
         output_folder=config.output.extraction_folder,
-        filename="extraction.json" if run_name else None,
+        filename="extraction.json" if run_dir else None,
         skipped=skipped,
     )
     typer.echo(f"\nExtraction saved → {extraction_out}")
@@ -247,7 +286,7 @@ def analyze(
         graph=graph,
         output_folder=config.output.context_folder,
         source_path=source_label,
-        filename="call_graph.json" if run_name else None,
+        filename="call_graph.json" if run_dir else None,
     )
     typer.echo(f"Call graph built successfully ({len(graph)} nodes)")
     typer.echo(f"Call graph saved → {context_out}")
@@ -433,7 +472,7 @@ def analyze(
         source_path=source_label,
         model=config.llm.model,
         results_folder=config.output.analysis_folder,
-        filename="analysis.json" if run_name else None,
+        filename="analysis.json" if run_dir else None,
         extra_meta=edge_meta,
         run_id=run_id,
     )
@@ -460,8 +499,9 @@ def analyze(
         typer.echo(
             f"  {len(reports)} of {len(samples)} function(s) analysed and saved. Resume with:\n"
             f"    python -m src.cli analyze --resume "
-            + (f"--run-name {run_name} " if run_name else "")
-            + (f"--dataset {dataset} " if dataset else "")
+            + (f'--output-dir "{output_dir}" ' if output_dir else "")
+            + (f"--run-name {run_name} " if run_name and not output_dir else "")
+            + (f"--dataset {dataset} " if dataset and not output_dir else "")
             + "... (same --path/--config/mode flags as this run)"
         )
         typer.echo(
@@ -1339,5 +1379,83 @@ def cost(
             typer.echo(_fmt(row))
 
 
+@app.command()
+def ui(
+    host: str = typer.Option(
+        "127.0.0.1", "--host",
+        help="Interface to bind. Localhost by default — this is an unauthenticated "
+             "single-user research tool, not a deployable service."
+    ),
+    port: int = typer.Option(8000, "--port", help="Port to serve on."),
+    dev: bool = typer.Option(
+        False, "--dev",
+        help="Serve the API only and enable autoreload, for use alongside "
+             "`npm run dev` in frontend/ (Vite on :5173 proxies /api here)."
+    ),
+    open_browser: bool = typer.Option(
+        True, "--open/--no-open", help="Open the UI in the default browser."
+    ),
+):
+    """
+    Serve the read-only web UI over the experiments tree.
+
+    Reads the same artifacts the other commands write (analysis.json,
+    extraction.json, call_graph.json, evaluations, patches, cost_ledger.db) —
+    it never writes to experiments/, the analyzed project, or the ledger.
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        typer.echo(
+            "The web UI needs fastapi + uvicorn:\n"
+            "  pip install -r requirements.txt",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    from src.web.app import FRONTEND_DIST
+
+    url = f"http://{'localhost' if host == '127.0.0.1' else host}:{port}"
+
+    if dev:
+        typer.echo(f"API  → {url}/api/docs  (autoreload)")
+        typer.echo("UI   → http://localhost:5173  (run `npm run dev` in frontend/)")
+    elif FRONTEND_DIST.is_dir():
+        typer.echo(f"UI   → {url}")
+        typer.echo(f"API  → {url}/api/docs")
+    else:
+        # Serving an unbuilt SPA silently would look like a broken app, so say
+        # exactly what is missing and how to fix it.
+        typer.echo(f"API  → {url}/api/docs")
+        typer.echo(
+            "UI   → not built. Either:\n"
+            "         cd frontend && npm install && npm run dev   (then use :5173)\n"
+            "         cd frontend && npm run build                (then reload this URL)"
+        )
+        open_browser = False
+
+    if open_browser and not dev:
+        import threading
+        import webbrowser
+
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+
+    uvicorn.run(
+        "src.web.app:app",
+        host=host,
+        port=port,
+        reload=dev,
+        log_level="info",
+    )
+
+
 if __name__ == "__main__":
-    app()
+    try:
+        app()
+    except KeyboardInterrupt:
+        # `analyze` handles Ctrl-C inside its analysis loop, where there are
+        # paid-for results to save. This catches it during every other phase
+        # (extraction, graph building) where there is nothing to save — so a
+        # cancel prints one line instead of a traceback.
+        typer.echo("\nCancelled.", err=True)
+        sys.exit(130)

@@ -1,0 +1,52 @@
+.stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s3) var(--s4);
+  min-width: 0;
+}
+
+.stat__label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat__value {
+  margin-top: var(--s1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xl);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.stat__value--compact {
+  font-size: var(--fs-lg);
+}
+
+.stat__value--accent {
+  color: var(--accent);
+}
+.stat__value--ok {
+  color: var(--ok);
+}
+.stat__value--warn {
+  color: var(--warn);
+}
+.stat__value--err {
+  color: var(--err);
+}
+.stat__value--muted {
+  color: var(--text-dim);
+}
+
+.stat__hint {
+  margin-top: var(--s1);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
