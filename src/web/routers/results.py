@@ -113,6 +113,62 @@ _SRI_ATTRS = re.compile(
     r"""\s+(?:integrity|crossorigin)\s*=\s*(?:"[^"]*"|'[^']*'|\S+)""", re.IGNORECASE
 )
 
+# pyvis sizes the canvas in fixed pixels on an unstyled white body, which inside
+# a shorter iframe shows as a white band above a clipped, separately-scrolling
+# graph. Sizing to the viewport makes the embed and the full-screen view fill
+# whatever they are given.
+_FIT_VIEWPORT = """
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #1a1a2e; overflow: hidden; }
+  body > .card { height: 100%; margin: 0; border: 0; border-radius: 0; }
+  #mynetwork { height: 100vh !important; border: 0 !important; float: none !important; }
+</style>
+</head>"""
+
+# Sizing the canvas to its frame is only half the job. vis-network measures the
+# container once, when the network is constructed, and computes the initial view
+# from that — but a viewport-relative height is not final until the embedding
+# frame has settled, which can happen after this document has already run
+# drawGraph(). The result is a graph fitted to a box that no longer exists, with
+# the nodes drawn outside the visible area: the legend renders, the canvas looks
+# empty, and there is nothing under the cursor to scroll-zoom. Refitting on every
+# size change costs nothing and removes the race entirely.
+_REFIT = """
+<script>
+  (function () {
+    var box = document.getElementById('mynetwork');
+    if (!box || typeof network === 'undefined' || !network) return;
+    var lastWidth = 0, lastHeight = 0;
+    var fit = function () {
+      try { network.fit({ animation: false }); } catch (err) { /* stabilising */ }
+    };
+    // Only when the box actually changed: setSize rebuilds the navigation
+    // overlay, and calling it on every tick leaves stale buttons behind.
+    var resize = function () {
+      var width = box.clientWidth, height = box.clientHeight;
+      if (!width || !height || (width === lastWidth && height === lastHeight)) return;
+      lastWidth = width; lastHeight = height;
+      try {
+        // setSize, not redraw: redraw repaints at the size vis-network already
+        // believes in. It measures the container once, at construction, and
+        // only re-measures when told — which is the whole bug.
+        network.setSize(width + "px", height + "px");
+        network.redraw();
+      } catch (err) { /* stabilising */ }
+      fit();
+    };
+    // Fires once on observe with the current size, so this covers first paint
+    // as well as any later resize of the frame or the window.
+    if (window.ResizeObserver) new ResizeObserver(resize).observe(box);
+    window.addEventListener("resize", resize);
+    // Physics keeps moving nodes after the first paint; fit again once settled.
+    try { network.on("stabilizationIterationsDone", fit); } catch (err) {}
+    requestAnimationFrame(resize);
+    setTimeout(resize, 400);
+  })();
+</script>
+</body>"""
+
 
 @router.get("/graph.html", response_class=HTMLResponse)
 def get_graph_html(
@@ -126,25 +182,28 @@ def get_graph_html(
     be days of work for no gain over what the CLI already emits.
     """
     directory = _directory(path)
-    order = ["call_graph_annotated.html", "call_graph.html"]
-    if not annotated:
-        order.reverse()
+    candidate = results.graph_html_file(directory, annotated=annotated)
+    if candidate is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No call graph HTML in this run — re-run with visualisation enabled.",
+        )
 
-    for name in order:
-        candidate = directory / name
-        if not candidate.is_file():
-            continue
-        html = candidate.read_text(encoding="utf-8", errors="replace")
-        for old, new in _ASSET_REWRITES:
-            html = html.replace(old, new)
-        html = _DEAD_ASSETS.sub("", html)
-        html = _VENDOR_TAG.sub(lambda m: _SRI_ATTRS.sub("", m.group(0)), html)
-        return HTMLResponse(html)
-
-    raise HTTPException(
-        status_code=404,
-        detail="No call graph HTML in this run — re-run with visualisation enabled.",
-    )
+    html = candidate.read_text(encoding="utf-8", errors="replace")
+    for old, new in _ASSET_REWRITES:
+        html = html.replace(old, new)
+    html = _DEAD_ASSETS.sub("", html)
+    html = _VENDOR_TAG.sub(lambda m: _SRI_ATTRS.sub("", m.group(0)), html)
+    html = html.replace("</head>", _FIT_VIEWPORT, 1)
+    # Appended rather than replaced when the document has no </body>, so a
+    # differently-shaped export still gets the refit.
+    html = html.replace("</body>", _REFIT, 1) if "</body>" in html else html + _REFIT
+    # No validator and no expiry on this response, so a browser is free to cache
+    # it heuristically — which pins whatever it saw first, including a copy
+    # fetched before the asset rewriting above existed (blank graph, no nodes,
+    # fixed only by a hard refresh). The bytes are also rebuilt on every re-run
+    # of the same output directory, so they must never be served from cache.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/artifacts")

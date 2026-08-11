@@ -25,6 +25,23 @@ def _mtime(path: Path) -> Optional[str]:
         return None
 
 
+# The interactive graph pyvis writes, in the order the embed endpoint prefers.
+# Annotated first: it carries the findings colouring. A run can produce either,
+# both, or neither — `analyze --annotate-graph` writes only the annotated one —
+# so "is there a graph to embed" must ask about both, never just one name.
+GRAPH_HTML_NAMES = ("call_graph_annotated.html", "call_graph.html")
+
+
+def graph_html_file(directory: Path, annotated: bool = True) -> Optional[Path]:
+    """The graph HTML this bundle can be embedded from, or None."""
+    names = GRAPH_HTML_NAMES if annotated else tuple(reversed(GRAPH_HTML_NAMES))
+    for name in names:
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def patch_file(directory: Path) -> Optional[Path]:
     """The patch artifact in a bundle.
 
@@ -50,6 +67,7 @@ def summary(directory: Path) -> dict:
     checkpoint = paths.read_jsonl(directory / "checkpoint.jsonl")
     patches = patch_file(directory)
     patch_data = paths.read_json(patches) if patches else None
+    graph_html = graph_html_file(directory)
 
     findings = (analysis or {}).get("findings") or []
     flagged = [f for f in findings if f.get("vulnerability_found")]
@@ -64,7 +82,11 @@ def summary(directory: Path) -> dict:
         "has_analysis": analysis is not None,
         "has_extraction": extraction is not None,
         "has_graph": graph is not None,
-        "has_graph_html": (directory / "call_graph.html").is_file(),
+        "has_graph_html": graph_html is not None,
+        # Stamps the embed URL, so a browser that cached the graph cannot keep
+        # serving it after a re-run rewrites the file — a changed URL bypasses
+        # the cache entirely, which no response header can do retroactively.
+        "graph_html_version": _mtime(graph_html) if graph_html else None,
         "has_annotated_html": (directory / "call_graph_annotated.html").is_file(),
         "has_dot": (directory / "call_graph.dot").is_file(),
         "has_checkpoint": bool(checkpoint),

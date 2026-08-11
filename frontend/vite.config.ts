@@ -19,6 +19,14 @@ export default defineConfig({
         target: "http://127.0.0.1:8000",
         changeOrigin: false,
       },
+      // The embedded call graph loads vis-network from /vendor, which only the
+      // FastAPI process serves. Unproxied, Vite answers with index.html, the
+      // browser gets HTML where it expected JavaScript, and the graph renders
+      // empty in dev only.
+      "/vendor": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: false,
+      },
     },
   },
   build: {

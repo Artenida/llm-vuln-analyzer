@@ -1,0 +1,30 @@
+/* Badges sit inline with the dataset/date line under a report's title. */
+.eval__subhead {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+/* The dataset column's warning marker — same colour as the .note it explains. */
+.eval__uncurated {
+  color: var(--warn);
+}
+
+.eval__footnote {
+  font-size: var(--fs-xs);
+  line-height: var(--lh-normal);
+  margin: 0;
+}
+
+/* A saved comparison is markdown written for a thesis appendix, not for the
+   browser — shown verbatim rather than half-rendered. */
+.eval__markdown {
+  max-height: 560px;
+  font-family: var(--font-mono);
+}
+
+.eval__error {
+  color: var(--err);
+  font-size: var(--fs-sm);
+}

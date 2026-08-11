@@ -57,6 +57,11 @@ RUN_ARTIFACTS = {
 # A directory is recognisable as a result bundle if it holds any of these.
 RESULT_MARKERS = ("analysis.json", "extraction.json", "call_graph.json")
 
+# Where `evaluate` writes, relative to a dataset. Evaluation reports are read
+# back by full path, so the directory name is the guard that keeps that read
+# from becoming a general file-read oracle.
+EVALUATION_DIR_NAME = "evaluations"
+
 
 class UnsafePathError(ValueError):
     """Raised when a request-derived path is refused."""
@@ -182,6 +187,56 @@ def resolve_artifact(raw_dir: str, name: str) -> Path:
 
 def looks_like_result_dir(directory: Path) -> bool:
     return any((directory / marker).is_file() for marker in RESULT_MARKERS)
+
+
+# ── evaluation reports ────────────────────────────────────────────────────────
+#
+# Evaluations are not run artifacts: they sit beside the dataset they scored,
+# not inside the run's output directory, and their filenames carry a run id
+# rather than coming from a fixed set. So they get their own rule — a file
+# directly inside an `evaluations/` directory under a registered root — which is
+# as narrow as a name-based whitelist without having to predict the names.
+
+
+def datasets_root() -> Path:
+    return experiments_root() / "datasets"
+
+
+def resolve_evaluation_file(raw: str) -> Path:
+    """Validate the path of an evaluation report or comparison from a request."""
+    path = normalise(raw)
+    if not path.is_file():
+        raise UnsafePathError("No such evaluation file")
+    if path.suffix.lower() not in (".json", ".md"):
+        raise UnsafePathError(f"Not an evaluation report: {path.name!r}")
+    if path.parent.name != EVALUATION_DIR_NAME:
+        raise UnsafePathError(
+            f"Evaluation reports are read only from a {EVALUATION_DIR_NAME}/ directory."
+        )
+    if not any(is_within(path, root) for root in registered_roots()):
+        raise UnsafePathError(
+            "That file is not in a known location. Evaluations are readable only "
+            "from directories this tool has written to."
+        )
+    return path
+
+
+def resolve_ground_truth(raw: str) -> Path:
+    """Validate a ground truth dataset path from a request.
+
+    Confined to `experiments/datasets/`, which is where `bootstrap-ground-truth`
+    writes and the only place the UI offers to pick from.
+    """
+    path = normalise(raw)
+    if not path.is_file():
+        raise UnsafePathError("No such ground truth file")
+    if path.suffix.lower() != ".json":
+        raise UnsafePathError(f"Not a ground truth dataset: {path.name!r}")
+    if not is_within(path, datasets_root()):
+        raise UnsafePathError(
+            f"Ground truth datasets are read only from {datasets_root()}."
+        )
+    return path
 
 
 # ── directory browsing ────────────────────────────────────────────────────────

@@ -1,3 +1,23 @@
+/* A stat tile that is also a link to the evaluation behind it. Sized like one
+   tile rather than stretched across the row: a lone score is one fact, and a
+   full-width tile reads as a banner. */
+.results__evalrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+}
+
+.results__evallink {
+  display: block;
+  flex: 0 1 280px;
+  text-decoration: none;
+  border-radius: var(--r-md);
+}
+
+.results__evallink:hover {
+  outline: 1px solid var(--accent-dim);
+}
+
 .results__graph {
   display: block;
   width: 100%;

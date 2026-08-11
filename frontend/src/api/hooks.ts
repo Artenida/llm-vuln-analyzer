@@ -4,10 +4,14 @@ import type {
   CostEstimate,
   CostResponse,
   DirListing,
+  EvaluationIndex,
+  EvaluationReport,
+  EvaluationSummary,
   ExtractionDocument,
   Finding,
   FsRoot,
   GraphDocument,
+  GroundTruthDataset,
   HealthResponse,
   HistoryEntry,
   InspectResult,
@@ -268,5 +272,59 @@ export function useForgetHistory() {
   return useMutation({
     mutationFn: (entryId: string) => api.delete(`/history/${entryId}`),
     onSuccess: () => client.invalidateQueries({ queryKey: ["history"] }),
+  });
+}
+
+// ── evaluations ──────────────────────────────────────────────────────────────
+
+export function useEvaluations() {
+  return useQuery({
+    queryKey: ["evaluations"],
+    queryFn: () => api.get<EvaluationIndex>("/evaluations"),
+  });
+}
+
+export function useEvaluationReport(path: string | null) {
+  return useQuery({
+    queryKey: ["evaluation", path],
+    queryFn: () => api.get<EvaluationReport>("/evaluations/report", { path: path! }),
+    enabled: Boolean(path),
+  });
+}
+
+export function useComparison(path: string | null) {
+  return useQuery({
+    queryKey: ["comparison", path],
+    queryFn: () => api.get<string>("/evaluations/comparison", { path: path! }),
+    enabled: Boolean(path),
+  });
+}
+
+export function useGroundTruthDatasets() {
+  return useQuery({
+    queryKey: ["ground-truth-datasets"],
+    queryFn: () => api.get<GroundTruthDataset[]>("/evaluations/datasets"),
+  });
+}
+
+/** Reports already produced for a run — drives the Results page cross-link. */
+export function useEvaluationsForRun(runId: string | null | undefined) {
+  return useQuery({
+    queryKey: ["evaluations-for-run", runId],
+    queryFn: () => api.get<EvaluationSummary[]>("/evaluations/for-run", { run_id: runId! }),
+    enabled: Boolean(runId),
+  });
+}
+
+/** Scoring is local and free — no API calls, so no confirmation step. */
+export function useRunEvaluation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { path: string; ground_truth: string }) =>
+      api.post<EvaluationReport>("/evaluations/run", payload),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["evaluations"] });
+      client.invalidateQueries({ queryKey: ["evaluations-for-run"] });
+    },
   });
 }

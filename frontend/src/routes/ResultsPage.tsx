@@ -4,6 +4,7 @@ import { apiUrl } from "@/api/client";
 import {
   useActiveJob,
   useArtifact,
+  useEvaluationsForRun,
   useExtraction,
   useFindings,
   useGraph,
@@ -48,6 +49,7 @@ import {
   formatDate,
   formatNumber,
   formatPercent,
+  formatRatio,
   formatTokens,
 } from "@/lib/format";
 import "./ResultsPage.css";
@@ -186,6 +188,8 @@ function SummaryTab({ result }: { result: ResultSummary }) {
           }
         />
       </div>
+
+      <EvaluationLink result={result} />
 
       <div className="grid-2">
         <Card title="Severity mix">
@@ -605,12 +609,64 @@ function FindingDrawer({
   );
 }
 
+/**
+ * A run's findings mean nothing on their own — "14 vulnerabilities" is a count,
+ * not a result, until it is scored against a ground truth. So the summary says
+ * whether that has happened, and links to the score if it has.
+ */
+function EvaluationLink({ result }: { result: ResultSummary }) {
+  const { data } = useEvaluationsForRun(result.run_id);
+  if (!result.run_id || !data) return null;
+
+  if (data.length === 0) {
+    return (
+      <div className="note">
+        <span className="note__label">Not scored</span>
+        These counts have not been checked against a ground truth dataset, so
+        they say what the tool reported, not what it got right.{" "}
+        <Link to="/evaluations">Score this run →</Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="results__evalrow">
+      {data.map((report) => (
+        <Link
+          key={report.path}
+          to={`/evaluations?report=${encodeURIComponent(report.path)}`}
+          className="results__evallink"
+        >
+          <StatTile
+            label={`Scored against ${report.dataset}`}
+            value={`F1 ${formatRatio(report.detection_metrics.f1)}`}
+            tone="accent"
+            hint={
+              report.curation.needs_curation
+                ? "uncurated ground truth — not valid"
+                : `precision ${formatRatio(report.detection_metrics.precision)} · recall ${formatRatio(report.detection_metrics.recall)}`
+            }
+          />
+        </Link>
+      ))}
+    </div>
+  );
+}
+
 // ── call graph ───────────────────────────────────────────────────────────────
 
 function GraphTab({ path, result }: { path: string; result: ResultSummary }) {
   const { data } = useGraph(path, result.has_graph);
   const [search, setSearch] = useState("");
   const [facets, setFacets] = useState<string[]>([]);
+
+  // Versioned by the file's mtime: re-running into the same directory rewrites
+  // the graph, and a URL the browser has already cached would keep showing the
+  // old one no matter what the response headers say.
+  const graphUrl = apiUrl("/results/graph.html", {
+    path,
+    v: result.graph_html_version ?? undefined,
+  });
 
   const nodes = useMemo(() => Object.values(data?.graph ?? {}), [data]);
   const rows = useMemo(() => {
@@ -683,11 +739,7 @@ function GraphTab({ path, result }: { path: string; result: ResultSummary }) {
           description="Drag nodes, scroll to zoom, click to highlight connections. Colours mark taint roles and finding severity."
           flush
           actions={
-            <a
-              href={apiUrl("/results/graph.html", { path })}
-              target="_blank"
-              rel="noreferrer"
-            >
+            <a href={graphUrl} target="_blank" rel="noreferrer">
               Open full screen ↗
             </a>
           }
@@ -696,7 +748,7 @@ function GraphTab({ path, result }: { path: string; result: ResultSummary }) {
               it beats re-implementing one in React. */}
           <iframe
             className="results__graph"
-            src={apiUrl("/results/graph.html", { path })}
+            src={graphUrl}
             title="Call graph"
           />
         </Card>

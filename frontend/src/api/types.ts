@@ -170,6 +170,8 @@ export interface ResultSummary {
   has_extraction: boolean;
   has_graph: boolean;
   has_graph_html: boolean;
+  /** mtime of the embedded graph HTML — stamped onto the iframe URL. */
+  graph_html_version: string | null;
   has_annotated_html: boolean;
   has_dot: boolean;
   has_checkpoint: boolean;
@@ -306,6 +308,135 @@ export interface CostResponse {
   by_phase: CostGroup[];
   by_model: CostGroup[];
   by_api_key: CostGroup[];
+}
+
+// ── evaluations ──────────────────────────────────────────────────────────────
+
+export interface ConfusionMetrics {
+  tp: number;
+  fp: number;
+  fn: number;
+  tn: number;
+  precision: number;
+  recall: number;
+  f1: number;
+}
+
+/** Deduplicated recall: one planted bug copy-pasted twice counts once. */
+export interface UniqueRecall {
+  planted: number;
+  detected: number;
+  recall: number;
+}
+
+/**
+ * Whether the ground truth behind a report was reviewed. `needs_curation` is
+ * null when the dataset is no longer on this machine — unknown, never assumed
+ * curated.
+ */
+export interface CurationStatus {
+  known: boolean;
+  scaffolded: boolean | null;
+  reviewed: boolean | null;
+  needs_curation: boolean | null;
+  functions_unreviewed?: number | null;
+  functions_prefilled_vulnerable?: number | null;
+  ground_truth_path?: string;
+}
+
+export interface EvaluationSummary {
+  path: string;
+  display_path: string;
+  name: string;
+  modified_at: string | null;
+
+  run_id: string | null;
+  dataset: string | null;
+  model: string | null;
+  analysis_mode: string | null;
+  source_path: string | null;
+  generated_at: string | null;
+  schema_version: string | null;
+
+  detection_metrics: ConfusionMetrics;
+  cwe_accuracy_on_true_positives: number | null;
+  unique_vulnerability_recall: UniqueRecall;
+  hallucination_rate_on_flagged: number | null;
+  total_cost_usd: number | null;
+  total_tokens: number | null;
+  cost_per_tp_usd: number | null;
+
+  instance_count: number;
+  unmatched_count: number;
+  unresolved_count: number;
+  curation: CurationStatus;
+}
+
+export interface EvaluationInstance {
+  instance_id: string;
+  function_name: string;
+  file: string;
+  gt_vulnerable: boolean;
+  gt_cwe: string | null;
+  analyzed: boolean;
+  predicted_vulnerable: boolean;
+  predicted_cwe: string | null;
+  outcome: "TP" | "FP" | "FN" | "TN" | string;
+  cwe_correct: boolean;
+  hallucination_flag: boolean;
+}
+
+export interface CweBreakdownRow {
+  cwe_id: string;
+  planted: number;
+  detected: number;
+  cwe_correct: number;
+}
+
+/** A finding whose function name has no ground truth row — unscorable. */
+export interface UnmatchedFinding {
+  function_name: string | null;
+  file_path: string | null;
+  vulnerability_found: boolean | null;
+  cwe_id: string | null;
+}
+
+/** A ground truth row whose function name matched several findings. */
+export interface UnresolvedFinding {
+  function_name: string;
+  expected_file: string;
+  candidate_files: (string | null)[];
+}
+
+export interface EvaluationReport extends EvaluationSummary {
+  instances: EvaluationInstance[];
+  cwe_breakdown: CweBreakdownRow[];
+  unmatched_findings: UnmatchedFinding[];
+  unresolved_findings: UnresolvedFinding[];
+}
+
+export interface ComparisonEntry {
+  path: string;
+  display_path: string;
+  name: string;
+  dataset: string | null;
+  modified_at: string | null;
+}
+
+export interface EvaluationIndex {
+  reports: EvaluationSummary[];
+  comparisons: ComparisonEntry[];
+}
+
+export interface GroundTruthDataset {
+  name: string;
+  folder: string;
+  path: string;
+  description: string;
+  source_path: string;
+  function_count: number;
+  vulnerable_count: number;
+  curation: CurationStatus;
 }
 
 // ── history ──────────────────────────────────────────────────────────────────
