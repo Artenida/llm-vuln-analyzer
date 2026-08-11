@@ -4,8 +4,10 @@ import {
   useComparison,
   useEvaluationReport,
   useEvaluations,
+  useEvaluationsForRun,
   useGroundTruthDatasets,
   useHistory,
+  useResult,
   useRunEvaluation,
 } from "@/api/hooks";
 import type {
@@ -14,7 +16,8 @@ import type {
   CweBreakdownRow,
   EvaluationInstance,
   EvaluationReport,
-  EvaluationSummary,
+  HistoryEntry,
+  ResultSummary,
   UnmatchedFinding,
   UnresolvedFinding,
 } from "@/api/types";
@@ -60,20 +63,45 @@ const CONFUSION: { key: "tp" | "fp" | "fn" | "tn"; label: string; color: string 
   { key: "tn", label: "TN — correctly clean", color: "var(--sev-none)" },
 ];
 
+/**
+ * Scoped to one run, not to the whole experiments tree.
+ *
+ * Addressed by the run's output directory, the same way Results is, so the two
+ * pages stay in step and "the run I am looking at" survives a refresh. With no
+ * `?path` it opens the most recent run that still exists — the same default
+ * Results uses.
+ */
 export function EvaluationsPage() {
   const [params, setParams] = useSearchParams();
-  const { data, isLoading, error } = useEvaluations();
+  const explicitPath = params.get("path");
+  const { data: history, isLoading: historyLoading } = useHistory();
 
-  const selected = params.get("report");
-  const comparison = params.get("comparison");
+  const runs = useMemo(() => (history ?? []).filter((entry) => entry.exists), [history]);
+  const path = explicitPath ?? runs[0]?.output_dir ?? null;
 
-  function select(key: "report" | "comparison", value: string | null) {
-    const next = new URLSearchParams(params);
-    // The two viewers are mutually exclusive — opening one closes the other.
-    next.delete("report");
-    next.delete("comparison");
-    if (value) next.set(key, value);
-    setParams(next, { replace: true });
+  const { data: result, isLoading, error } = useResult(path);
+
+  function open(next: string) {
+    // Changing run drops the report/comparison selection: they belong to the
+    // run that was open, and carrying them over would show one run's header
+    // above another run's numbers.
+    setParams(next ? { path: next } : {}, { replace: true });
+  }
+
+  if (!path) {
+    if (historyLoading) return <Skeleton rows={5} />;
+    return (
+      <EmptyState
+        icon="±"
+        title="No runs to score"
+        detail={
+          <>
+            An evaluation scores a finished run against a ground truth dataset.{" "}
+            <Link to="/">Run an analysis →</Link>
+          </>
+        }
+      />
+    );
   }
 
   return (
@@ -81,207 +109,140 @@ export function EvaluationsPage() {
       <div className="page-title">
         <h1>Evaluations</h1>
         <span className="page-subtitle">
-          Runs scored against a ground truth dataset — precision, recall and
-          what each one cost to get there.
+          How one run scored against a ground truth dataset.
         </span>
       </div>
 
-      <QueryBoundary isLoading={isLoading} error={error} data={data} skeletonRows={5}>
-        {(index) => (
-          <div className="stack">
-            {index.reports.length === 0 && index.comparisons.length === 0 ? (
-              <EmptyState
-                icon="±"
-                title="Nothing scored yet"
-                detail={
-                  <>
-                    An evaluation compares a finished run against a curated
-                    ground truth dataset. Score one below, or from the terminal
-                    with <code>evaluate</code>.
-                  </>
-                }
-              />
-            ) : (
-              <ReportsTable
-                reports={index.reports}
-                selected={selected}
-                onSelect={(path) => select("report", path === selected ? null : path)}
-              />
-            )}
+      <RunPicker runs={runs} path={path} onChange={open} />
 
-            {selected && <ReportDetail path={selected} reports={index.reports} />}
-
-            {comparison && (
-              <ComparisonView path={comparison} onClose={() => select("comparison", null)} />
-            )}
-
-            {index.comparisons.length > 0 && !comparison && (
-              <SavedComparisons
-                entries={index.comparisons}
-                onOpen={(path) => select("comparison", path)}
-              />
-            )}
-
-            <ScoreRunCard onScored={(path) => select("report", path)} />
-          </div>
-        )}
+      <QueryBoundary isLoading={isLoading} error={error} data={result} skeletonRows={5}>
+        {(run) => <RunEvaluations path={path} run={run} />}
       </QueryBoundary>
     </div>
   );
 }
 
-// ── the report list ──────────────────────────────────────────────────────────
-
-function ReportsTable({
-  reports,
-  selected,
-  onSelect,
+function RunPicker({
+  runs,
+  path,
+  onChange,
 }: {
-  reports: EvaluationSummary[];
-  selected: string | null;
-  onSelect: (path: string) => void;
+  runs: HistoryEntry[];
+  path: string;
+  onChange: (path: string) => void;
 }) {
-  const [search, setSearch] = useState("");
-  const [datasets, setDatasets] = useState<string[]>([]);
-
-  const options = useMemo(
-    () => Array.from(new Set(reports.map((r) => r.dataset).filter(Boolean) as string[])),
-    [reports],
+  const known = runs.some((entry) => entry.output_dir === path);
+  return (
+    <Card>
+      <div className="eval__picker">
+        <Field label="Run">
+          <Select
+            value={path}
+            onChange={onChange}
+            options={[
+              // A ?path pointing outside history still opens; it just gets its
+              // own entry rather than silently snapping to another run.
+              ...(known ? [] : [{ value: path, label: shortPath(path, 2) }]),
+              ...runs.map((entry) => ({
+                value: entry.output_dir,
+                label: `${entry.label}${entry.run_id ? ` — ${entry.run_id}` : ""}`,
+              })),
+            ]}
+          />
+        </Field>
+        <Link className="eval__crosslink" to={`/results?path=${encodeURIComponent(path)}`}>
+          Open in Results ↗
+        </Link>
+      </div>
+    </Card>
   );
+}
 
-  const rows = useMemo(() => {
-    const needle = search.toLowerCase();
-    return reports.filter((report) => {
-      if (datasets.length && !datasets.includes(report.dataset ?? "")) return false;
-      if (!needle) return true;
-      return (
-        (report.run_id ?? "").toLowerCase().includes(needle) ||
-        (report.dataset ?? "").toLowerCase().includes(needle) ||
-        (report.model ?? "").toLowerCase().includes(needle)
-      );
-    });
-  }, [reports, search, datasets]);
+/** Everything on this page for the selected run, and nothing from any other. */
+function RunEvaluations({ path, run }: { path: string; run: ResultSummary }) {
+  const [params, setParams] = useSearchParams();
+  const { data: reports, isLoading } = useEvaluationsForRun(run.run_id);
+  const comparison = params.get("comparison");
 
-  const columns: Column<EvaluationSummary>[] = [
-    {
-      id: "dataset",
-      header: "Dataset",
-      sortValue: (r) => r.dataset,
-      cell: (r) => (
-        <div className="runcell">
-          <span className="runcell__name">{r.dataset ?? "—"}</span>
-          {r.curation.needs_curation && (
-            <span className="runcell__note eval__uncurated">uncurated ground truth</span>
-          )}
-        </div>
-      ),
-    },
-    {
-      id: "run",
-      header: "Run",
-      sortValue: (r) => r.run_id,
-      cell: (r) => (
-        <div className="runcell">
-          <span className="runcell__name">{r.run_id ?? r.name}</span>
-          <span className="runcell__note">{r.model ?? "unknown model"}</span>
-        </div>
-      ),
-    },
-    {
-      id: "mode",
-      header: "Mode",
-      sortValue: (r) => r.analysis_mode,
-      cell: (r) => <ModeBadge mode={r.analysis_mode} />,
-    },
-    {
-      id: "precision",
-      header: "Precision",
-      align: "right",
-      sortValue: (r) => r.detection_metrics.precision ?? null,
-      cell: (r) => <span className="num">{formatRatio(r.detection_metrics.precision)}</span>,
-    },
-    {
-      id: "recall",
-      header: "Recall",
-      align: "right",
-      sortValue: (r) => r.detection_metrics.recall ?? null,
-      cell: (r) => <span className="num">{formatRatio(r.detection_metrics.recall)}</span>,
-    },
-    {
-      id: "f1",
-      header: "F1",
-      align: "right",
-      sortValue: (r) => r.detection_metrics.f1 ?? null,
-      cell: (r) => <span className="num strong">{formatRatio(r.detection_metrics.f1)}</span>,
-    },
-    {
-      id: "unique",
-      header: "Unique recall",
-      align: "right",
-      secondary: true,
-      sortValue: (r) => r.unique_vulnerability_recall.recall ?? null,
-      cell: (r) => (
-        <span
-          className="num"
-          title="Deduplicated: one bug copy-pasted into two files counts once."
-        >
-          {r.unique_vulnerability_recall.detected ?? 0}/
-          {r.unique_vulnerability_recall.planted ?? 0}
-        </span>
-      ),
-    },
-    {
-      id: "cost",
-      header: "$ / TP",
-      align: "right",
-      secondary: true,
-      sortValue: (r) => r.cost_per_tp_usd,
-      cell: (r) => <span className="num">{formatCost(r.cost_per_tp_usd)}</span>,
-    },
-    {
-      id: "when",
-      header: "Scored",
-      align: "right",
-      secondary: true,
-      sortValue: (r) => r.generated_at ?? r.modified_at,
-      cell: (r) => (
-        <span className="dim" title={formatDate(r.generated_at ?? r.modified_at)}>
-          {formatRelative(r.generated_at ?? r.modified_at)}
-        </span>
-      ),
-    },
-  ];
+  function select(key: "report" | "comparison", value: string | null) {
+    const next = new URLSearchParams(params);
+    next.delete("report");
+    next.delete("comparison");
+    if (value) next.set(key, value);
+    setParams(next, { replace: true });
+  }
+
+  if (!run.run_id) {
+    return (
+      <EmptyState
+        icon="±"
+        title="This run cannot be scored"
+        detail="It has no analysis.json, so there are no findings to match against a dataset."
+      />
+    );
+  }
+
+  if (isLoading || !reports) return <Skeleton rows={5} />;
+
+  const selected =
+    reports.find((report) => report.path === params.get("report"))?.path ??
+    reports[0]?.path ??
+    null;
 
   return (
-    <Card flush title="Reports" description="Click a row to open the full scorecard.">
-      <FilterBar
-        search={search}
-        onSearch={setSearch}
-        placeholder="Search run, dataset or model…"
-        count={`${rows.length} of ${reports.length}`}
-        onReset={search || datasets.length ? () => { setSearch(""); setDatasets([]); } : undefined}
-      >
-        {options.length > 1 && (
-          <FilterChips options={options} selected={datasets} onChange={setDatasets} />
-        )}
-      </FilterBar>
-      <DataTable
-        columns={columns}
-        rows={rows}
-        rowKey={(r) => r.path}
-        dense
-        onRowClick={(r) => onSelect(r.path)}
-        isActive={(r) => r.path === selected}
-        initialSort={{ columnId: "when", direction: "desc" }}
-        empty={<EmptyState title="No report matches that filter" />}
+    <div className="stack">
+      {reports.length === 0 ? (
+        <EmptyState
+          icon="±"
+          title="This run has not been scored"
+          detail={
+            <>
+              Pick a ground truth dataset below to score it, or run{" "}
+              <code>evaluate</code> from the terminal.
+            </>
+          }
+        />
+      ) : (
+        <>
+          {/* Only when the same run was scored against several datasets. */}
+          {reports.length > 1 && (
+            <div className="eval__reportchips">
+              {reports.map((report) => (
+                <button
+                  key={report.path}
+                  type="button"
+                  className={report.path === selected ? "chip chip--active" : "chip"}
+                  aria-pressed={report.path === selected}
+                  onClick={() => select("report", report.path)}
+                >
+                  {report.dataset ?? report.name}
+                </button>
+              ))}
+            </div>
+          )}
+          {selected && <ReportDetail path={selected} />}
+        </>
+      )}
+
+      <ScoreRunCard
+        runPath={path}
+        runLabel={run.display_dir.split(/[\\/]/).pop() ?? path}
+        scored={reports.map((report) => report.dataset)}
       />
-    </Card>
+
+      {comparison ? (
+        <ComparisonView path={comparison} onClose={() => select("comparison", null)} />
+      ) : (
+        <RunComparisons datasets={reports.map((report) => report.dataset)}
+                        onOpen={(target) => select("comparison", target)} />
+      )}
+    </div>
   );
 }
 
 // ── one report ───────────────────────────────────────────────────────────────
 
-function ReportDetail({ path, reports }: { path: string; reports: EvaluationSummary[] }) {
+function ReportDetail({ path }: { path: string }) {
   const { data, isLoading, error } = useEvaluationReport(path);
 
   return (
@@ -306,8 +267,6 @@ function ReportDetail({ path, reports }: { path: string; reports: EvaluationSumm
               <ConfusionSplit report={report} />
             </div>
           </Card>
-
-          <SameDatasetComparison report={report} reports={reports} />
 
           <ReportTabs report={report} />
         </div>
@@ -414,93 +373,6 @@ function ConfusionSplit({ report }: { report: EvaluationReport }) {
         the recall it actually delivered.
       </p>
     </div>
-  );
-}
-
-// ── comparison across runs on the same dataset ───────────────────────────────
-
-/**
- * The question the mode split exists to answer — agentic vs semantic on the same
- * dataset — is only readable side by side, so it is assembled here rather than
- * left to the saved markdown table.
- */
-function SameDatasetComparison({
-  report,
-  reports,
-}: {
-  report: EvaluationReport;
-  reports: EvaluationSummary[];
-}) {
-  const siblings = reports.filter((r) => r.dataset === report.dataset);
-  if (siblings.length < 2) return null;
-
-  const columns: Column<EvaluationSummary>[] = [
-    {
-      id: "run",
-      header: "Run",
-      cell: (r) => (
-        <div className="runcell">
-          <span className="runcell__name">{r.run_id ?? r.name}</span>
-          <span className="runcell__note">{r.model ?? "unknown model"}</span>
-        </div>
-      ),
-    },
-    { id: "mode", header: "Mode", cell: (r) => <ModeBadge mode={r.analysis_mode} /> },
-    { id: "tp", header: "TP", align: "right", cell: (r) => <span className="num">{r.detection_metrics.tp}</span> },
-    { id: "fp", header: "FP", align: "right", cell: (r) => <span className="num">{r.detection_metrics.fp}</span> },
-    { id: "fn", header: "FN", align: "right", cell: (r) => <span className="num">{r.detection_metrics.fn}</span> },
-    {
-      id: "precision",
-      header: "Precision",
-      align: "right",
-      sortValue: (r) => r.detection_metrics.precision ?? null,
-      cell: (r) => <span className="num">{formatRatio(r.detection_metrics.precision)}</span>,
-    },
-    {
-      id: "recall",
-      header: "Recall",
-      align: "right",
-      sortValue: (r) => r.detection_metrics.recall ?? null,
-      cell: (r) => <span className="num">{formatRatio(r.detection_metrics.recall)}</span>,
-    },
-    {
-      id: "f1",
-      header: "F1",
-      align: "right",
-      sortValue: (r) => r.detection_metrics.f1 ?? null,
-      cell: (r) => <span className="num strong">{formatRatio(r.detection_metrics.f1)}</span>,
-    },
-    {
-      id: "cost",
-      header: "Cost",
-      align: "right",
-      sortValue: (r) => r.total_cost_usd,
-      cell: (r) => <span className="num">{formatCost(r.total_cost_usd)}</span>,
-    },
-    {
-      id: "costtp",
-      header: "$ / TP",
-      align: "right",
-      sortValue: (r) => r.cost_per_tp_usd,
-      cell: (r) => <span className="num">{formatCost(r.cost_per_tp_usd)}</span>,
-    },
-  ];
-
-  return (
-    <Card
-      flush
-      title={`Every run scored against ${report.dataset}`}
-      description="Accuracy and cost on one row each — the comparison the mode split exists to make."
-    >
-      <DataTable
-        columns={columns}
-        rows={siblings}
-        rowKey={(r) => r.path}
-        dense
-        isActive={(r) => r.path === report.path}
-        initialSort={{ columnId: "f1", direction: "desc" }}
-      />
-    </Card>
   );
 }
 
@@ -801,15 +673,28 @@ function Unscored({ report }: { report: EvaluationReport }) {
   );
 }
 
-// ── saved comparison markdown ────────────────────────────────────────────────
+// ── saved comparisons for this run's dataset ─────────────────────────────────
 
-function SavedComparisons({
-  entries,
+/**
+ * The one place another run's numbers can still appear, and only as a document
+ * the user deliberately produced: `evaluate` with several `--results` writes a
+ * markdown table comparing them. Filtered to the dataset this run was scored
+ * against, so it is context for what is on screen rather than a directory dump.
+ */
+function RunComparisons({
+  datasets,
   onOpen,
 }: {
-  entries: ComparisonEntry[];
+  datasets: (string | null)[];
   onOpen: (path: string) => void;
 }) {
+  const { data } = useEvaluations();
+  const wanted = new Set(datasets.filter(Boolean) as string[]);
+  const entries = (data?.comparisons ?? []).filter((entry) =>
+    entry.dataset ? wanted.has(entry.dataset) : false,
+  );
+  if (entries.length === 0) return null;
+
   const columns: Column<ComparisonEntry>[] = [
     {
       id: "name",
@@ -831,7 +716,7 @@ function SavedComparisons({
     <Card
       flush
       title="Saved comparisons"
-      description="Written by a multi-run evaluate. Click to read."
+      description="Multi-run tables written by evaluate, for the dataset this run was scored against."
     >
       <DataTable
         columns={columns}
@@ -860,26 +745,27 @@ function ComparisonView({ path, onClose }: { path: string; onClose: () => void }
   );
 }
 
-// ── scoring a run from here ──────────────────────────────────────────────────
+// ── scoring the selected run ─────────────────────────────────────────────────
 
-function ScoreRunCard({ onScored }: { onScored: (path: string) => void }) {
-  const { data: history } = useHistory();
+/** The run is whatever the page is showing — only the dataset is a choice. */
+function ScoreRunCard({
+  runPath,
+  runLabel,
+  scored,
+}: {
+  runPath: string;
+  runLabel: string;
+  scored: (string | null)[];
+}) {
   const { data: datasets } = useGroundTruthDatasets();
   const score = useRunEvaluation();
-
-  const [run, setRun] = useState("");
   const [dataset, setDataset] = useState("");
 
-  const runnable = useMemo(
-    () => (history ?? []).filter((entry) => entry.exists && entry.run_id),
-    [history],
-  );
-
-  if (!history || !datasets) return <Skeleton rows={3} />;
+  if (!datasets) return <Skeleton rows={3} />;
 
   if (datasets.length === 0) {
     return (
-      <Card title="Score a run" description="Nothing to score against yet.">
+      <Card title="Score this run" description="Nothing to score against yet.">
         <p className="prose">
           Evaluation needs a ground truth dataset in{" "}
           <code>experiments/datasets/</code>. Create one with{" "}
@@ -891,41 +777,29 @@ function ScoreRunCard({ onScored }: { onScored: (path: string) => void }) {
   }
 
   const chosen = datasets.find((d) => d.path === dataset);
+  const already = new Set(scored.filter(Boolean) as string[]);
 
   return (
     <Card
-      title="Score a run"
-      description="Matches a finished run's findings against a dataset. Local, read-only, and free — no API calls."
+      title="Score this run"
+      description={`Match ${runLabel}'s findings against a dataset. Local, read-only and free — no API calls.`}
     >
       <div className="stack">
-        <div className="grid-2">
-          <Field label="Run" hint="Only runs whose output directory still exists.">
-            <Select
-              value={run}
-              onChange={setRun}
-              options={[
-                { value: "", label: runnable.length ? "Choose a run…" : "No runs available" },
-                ...runnable.map((entry) => ({
-                  value: entry.output_dir,
-                  label: `${entry.label} — ${entry.run_id}`,
-                })),
-              ]}
-            />
-          </Field>
-          <Field label="Ground truth" hint={chosen?.description || "From experiments/datasets/."}>
-            <Select
-              value={dataset}
-              onChange={setDataset}
-              options={[
-                { value: "", label: "Choose a dataset…" },
-                ...datasets.map((d) => ({
-                  value: d.path,
-                  label: `${d.name} — ${d.vulnerable_count} of ${d.function_count} vulnerable`,
-                })),
-              ]}
-            />
-          </Field>
-        </div>
+        <Field label="Ground truth" hint={chosen?.description || "From experiments/datasets/."}>
+          <Select
+            value={dataset}
+            onChange={setDataset}
+            options={[
+              { value: "", label: "Choose a dataset…" },
+              ...datasets.map((d) => ({
+                value: d.path,
+                // Says which datasets this run already has a score against, so
+                // re-scoring is a deliberate act rather than an accident.
+                label: `${d.name} — ${d.vulnerable_count} of ${d.function_count} vulnerable${already.has(d.name) ? " (already scored)" : ""}`,
+              })),
+            ]}
+          />
+        </Field>
 
         {chosen?.curation.needs_curation && (
           <div className="note">
@@ -938,15 +812,14 @@ function ScoreRunCard({ onScored }: { onScored: (path: string) => void }) {
         <div className="row">
           <Button
             variant="primary"
-            disabled={!run || !dataset || score.isPending}
-            onClick={() =>
-              score.mutate(
-                { path: run, ground_truth: dataset },
-                { onSuccess: (report) => onScored(report.path) },
-              )
-            }
+            disabled={!dataset || score.isPending}
+            onClick={() => score.mutate({ path: runPath, ground_truth: dataset })}
           >
-            {score.isPending ? "Scoring…" : "Score run"}
+            {score.isPending
+              ? "Scoring…"
+              : chosen && already.has(chosen.name)
+                ? "Re-score run"
+                : "Score run"}
           </Button>
           {score.error != null && (
             <span className="eval__error">{(score.error as Error).message}</span>
@@ -957,7 +830,7 @@ function ScoreRunCard({ onScored }: { onScored: (path: string) => void }) {
           The report is written to{" "}
           <code>experiments/datasets/&lt;dataset&gt;/evaluations/</code>, the same
           place the <code>evaluate</code> command writes it. Nothing else is
-          modified. Runs already scored are re-scored in place.{" "}
+          modified. Re-scoring overwrites this run's existing report.{" "}
           <Link to="/history">See all runs →</Link>
         </p>
       </div>

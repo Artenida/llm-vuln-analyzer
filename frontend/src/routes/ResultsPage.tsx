@@ -624,7 +624,9 @@ function EvaluationLink({ result }: { result: ResultSummary }) {
         <span className="note__label">Not scored</span>
         These counts have not been checked against a ground truth dataset, so
         they say what the tool reported, not what it got right.{" "}
-        <Link to="/evaluations">Score this run →</Link>
+        <Link to={`/evaluations?path=${encodeURIComponent(result.output_dir)}`}>
+          Score this run →
+        </Link>
       </div>
     );
   }
@@ -634,7 +636,7 @@ function EvaluationLink({ result }: { result: ResultSummary }) {
       {data.map((report) => (
         <Link
           key={report.path}
-          to={`/evaluations?report=${encodeURIComponent(report.path)}`}
+          to={`/evaluations?path=${encodeURIComponent(result.output_dir)}&report=${encodeURIComponent(report.path)}`}
           className="results__evallink"
         >
           <StatTile

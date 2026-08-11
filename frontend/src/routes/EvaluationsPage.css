@@ -1,3 +1,30 @@
+/* The run this page is scoped to, with a way out to the same run's Results. */
+.eval__picker {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s4);
+  flex-wrap: wrap;
+}
+
+.eval__picker > * {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.eval__crosslink {
+  flex: 0 0 auto;
+  font-size: var(--fs-sm);
+  padding-bottom: var(--s1);
+}
+
+/* Only shown when one run was scored against more than one dataset. */
+.eval__reportchips {
+  display: flex;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
 /* Badges sit inline with the dataset/date line under a report's title. */
 .eval__subhead {
   display: flex;
