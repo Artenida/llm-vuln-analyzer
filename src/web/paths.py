@@ -52,6 +52,9 @@ RUN_ARTIFACTS = {
     "call_graph_annotated.html",
     "checkpoint.jsonl",
     "patches.json",
+    # The journal of patches written into the analysed project — readable so the
+    # record of what was changed on disk is never less visible than the diffs.
+    "patches_applied.json",
 }
 
 # A directory is recognisable as a result bundle if it holds any of these.

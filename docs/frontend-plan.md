@@ -49,7 +49,7 @@ so a result you produced yesterday is still reachable.
 | Show every element of a result | Every field of `analysis.json`, `extraction.json`, `call_graph.json` and the patch artifact is reachable, with a raw-JSON fallback so the answer is never "you can't see it". |
 | Must not look careless | One design system, defined in §4 and already built in Sprint 8. |
 | Runs cost real money | No analysis starts without an explicit confirm showing a projected cost. `--budget-usd` is pre-filled, not opt-in. |
-| Must never corrupt source | The UI never writes into the analyzed folder. Patch `--apply` stays CLI-only. |
+| Must never corrupt source | Nothing writes into the analyzed folder as a side effect. The one write that exists is Apply on a single reviewed diff — opt-in, confirmed, verified against the analyzed bytes, and reversible. See §9. |
 
 ---
 
@@ -168,7 +168,7 @@ Tabs. Every field of every artifact appears somewhere.
 | **Findings** | Sortable, filterable table (severity · CWE · file · confidence · hallucinated · error · duplicate group). Row → drawer with the explanation, patch suggestion, the function's real source with `affected_lines` highlighted, per-finding tokens and cost, and the generated diff once patches exist. |
 | **Call graph** | The interactive `call_graph.html` / `call_graph_annotated.html` embedded in an iframe — these are already self-contained, dark-themed and good, so re-implementing them would be waste. Beside it, a searchable node table over `call_graph.json` (callers, callees, entry point, infrastructure, external, taint source, taint sink), which is what a graph is bad at. |
 | **Extraction** | Coverage bar, the `skipped_oversized[]` table, and every extracted function with its source. |
-| **Patches** | **Generate patches** button → runs `patch` as a job with its own cost confirm. Then: each patch's rendered unified diff, valid/invalid, error, tokens, cost. `--apply` is deliberately absent; the artifact is reviewable and the source is untouched. |
+| **Patches** | **Generate patches** button → runs `patch` as a job with its own cost confirm. Then: each patch's rendered unified diff, valid/invalid, error, tokens, cost, and whether it is currently written to the source file. Generating changes nothing on disk; **Apply** on an individual diff writes that one function, and **Revert** puts it back. See §9. |
 | **Raw** | Every file in the output directory, with a JSON viewer. The guarantee nothing is unreachable. |
 
 ### 5.3 Dashboard — `/dashboard`
@@ -321,8 +321,9 @@ the end-to-end case is not.
 - **11.3** History page and registry.
 
 **Exit criteria**
-- [x] Patches generate from a button and render as diffs; source stays untouched
-      (`--apply` is unreachable from the web layer by construction)
+- [x] Patches generate from a button and render as diffs; generating leaves the
+      source untouched (bulk `--apply` is still unreachable from the web layer —
+      per-diff Apply, added later, is the only write; see §9)
 - [x] Dashboard figures come from `CostLedger` directly, so they cannot diverge
       from `python -m src.cli cost`; `n/a` groups are preserved
 - [x] A result written outside `experiments/` is still reachable from History
@@ -347,7 +348,7 @@ a `vite build` step wired into `ui`, thesis screenshots.
 | **Subprocess, not in-process analysis** | Real cancellation, no event-loop blocking, and the UI cannot drift from the CLI because it *is* the CLI. |
 | **API key in `.env`** | The file the CLI already reads, so a key set in the UI works in the terminal too. Stored in plaintext, which the Settings page says outright. Never returned to the browser. |
 | **Iframe the existing call graph** | `export_graph.py` already emits a self-contained interactive graph with taint and severity colouring. Re-implementing it in React would cost days for nothing. |
-| **`patch --apply` stays CLI-only** | Writing changes into the analyzed project from a browser button is exactly the implicit write the project forbids. The UI produces the reviewable artifact only. |
+| **Per-diff Apply, never bulk apply** | Superseded the earlier "`patch --apply` stays CLI-only" exclusion, on request: a user who has read a diff and wants that fix should be able to take it. What the original reasoning was actually protecting against was the *implicit* write — a whole run applied as a side effect of generating patches. So the bulk path stays CLI-only and the UI writes one reviewed function at a time. See §9. |
 | **No auth, binds to localhost** | Single-user local instrument. Auth implies a deployment story that does not exist. |
 | **No server-side pagination** | The largest artifact is a few hundred rows; one fetch plus client filtering is simpler and faster. |
 | **Call-graph assets are vendored, not CDN** | pyvis emits a page that loads vis-network from a CDN, references `lib/` relatively, and points at a `node_modules/vis` tree this project does not have. None of that survives being served from an API URL — the relative paths fall through to the SPA catch-all and the browser gets HTML where it expected JavaScript. `/api/results/graph.html` rewrites those references to `/vendor/`, backed by the `lib/` already in the repo, and strips the CDN Subresource Integrity hashes (which no longer match the local files and would otherwise block the script). The graph now renders in the iframe with no internet at all. |
@@ -363,3 +364,59 @@ rendered nothing. Front-end changes are now checked by driving a real browser
 and surviving a reconnect, `Results` opening the latest run, the call graph
 actually painting a canvas, and a zero-console-error assertion. The harness
 lives outside the repo; promoting it to a checked-in test suite is open.
+
+---
+
+## 9. Applying a patch to the analysed project
+
+The Patches tab can write a generated fix into the source file it came from.
+This is the only place the web layer modifies a file outside a result
+directory, and it reverses the original "`patch --apply` stays CLI-only"
+exclusion in §8 — deliberately, on request, and with the reasoning behind that
+exclusion preserved rather than discarded.
+
+The thing that rule was protecting against is the **implicit** write: a whole
+run applied to disk as a side effect of generating patches, or of opening a
+page. That has not changed. What is now allowed is the explicit one: a user
+reads a specific diff and chooses to take that specific fix.
+
+### The shape of it
+
+`src/web/patch_apply.py`, behind `POST /api/results/patches/apply` and
+`/revert`. One function per request; there is no bulk endpoint to reach for by
+accident, and `patch --apply` is still the way to write a whole run at once.
+
+In the UI: open a diff from the Patches table → **Apply to source file** → a
+confirm step that names the file being overwritten → applied. The table gains a
+*Source file* column (`unchanged` / `applied` / `reverted`) so the state of the
+project is readable without opening anything.
+
+### What it refuses, and why
+
+| Guard | Without it |
+|---|---|
+| `patch_valid` must be `true` | A diff that failed the tree-sitter parse check would be written as a "fix" that does not compile. |
+| Target must resolve inside the run's own `source_path` | `file_path` arrives on the request. Without containment the endpoint is a write-anywhere oracle. |
+| File content must match `extraction.json` byte for byte | The recorded line range still points *somewhere* after the file is edited — at unrelated code. This is the difference between a patch and a deletion. |
+| The function is located by content, not by line number | Applying one patch shifts every function below it in the same file, so by the second apply the recorded range is stale. Content matching absorbs the drift; the recorded line is only a hint. |
+| Two identical bodies → refuse | There is no single correct place to write, so nothing is written. |
+| Line endings and first-line indent are taken from the file | tree-sitter records a node from its first *column*, so an indented function's extracted source has no leading indent on line one while the file does — dropping it breaks the enclosing block, fatally in Python. Splicing LF text into a CRLF file turns one fix into a whole-file diff. |
+
+### Reversibility
+
+Every applied patch is journalled to `patches_applied.json` in the **result**
+directory, holding the exact bytes on both sides of the edit. That is what
+Revert restores, and keeping it with the results rather than as a `.bak` beside
+the user's code means applying a fix leaves nothing behind in their project but
+the fix itself. Reverted entries are kept, not deleted: "applied and undone" is
+a different fact from "never applied".
+
+The file is deliberately **not** named `applied_patches.json` — `patch_file()`
+finds a run's patch artifact with a `*_patches.json` glob and takes the newest
+match, so that name made the journal shadow the patch document itself on the
+first apply. `results.patch_file()` now also excludes it by name.
+
+Covered by `tests/test_patch_apply.py` (17 tests, weighted towards the refusals:
+a wrong write here corrupts a source tree while looking like a successful fix).
+**Not yet checked in a real browser** — see *Browser verification* above; the
+API path and the engine are tested, the rendered control is not.

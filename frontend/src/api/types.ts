@@ -281,6 +281,25 @@ export interface PatchRecord {
   cost_usd?: number | null;
 }
 
+/** One patch written into the analysed project, and the bytes it replaced. */
+export interface AppliedPatch {
+  function_name: string;
+  file_path: string;
+  cwe_id?: string | null;
+  severity?: string | null;
+  state: "applied" | "reverted";
+  applied_at?: string | null;
+  reverted_at?: string | null;
+  line?: number | null;
+  original_code?: string | null;
+  patched_code?: string | null;
+}
+
+export interface AppliedPatches {
+  entries: AppliedPatch[];
+  applied_count: number;
+}
+
 export interface PatchDocument {
   run_id?: string;
   source_path?: string;

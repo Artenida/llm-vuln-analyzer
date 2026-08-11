@@ -12,8 +12,9 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
+from pydantic import BaseModel, Field
 
-from src.web import paths, results
+from src.web import patch_apply, paths, results
 
 router = APIRouter(prefix="/results", tags=["results"])
 
@@ -56,6 +57,52 @@ def get_checkpoint(path: str = Query(...)) -> list[dict]:
 @router.get("/patches")
 def get_patches(path: str = Query(...)) -> Optional[dict]:
     return results.patches(_directory(path))
+
+
+# ── applying a patch to the analysed project ──────────────────────────────────
+#
+# The only write this API makes outside a result directory. It is a POST per
+# finding, never a bulk operation, and it carries no "apply all" convenience —
+# the user reads one diff and chooses to take that one change. `patch --apply`
+# on the CLI remains the way to write a whole run at once.
+#
+# All the safety work is in `patch_apply`; this layer only turns its refusals
+# into status codes.
+
+
+class PatchTarget(BaseModel):
+    path: str = Field(..., description="Run output directory.")
+    file_path: str = Field(..., description="File path as recorded on the patch.")
+    function_name: str = Field(..., description="Function the patch rewrites.")
+
+
+@router.get("/patches/applied")
+def get_applied(path: str = Query(...)) -> dict:
+    return patch_apply.status(_directory(path))
+
+
+@router.post("/patches/apply")
+def post_apply(target: PatchTarget) -> dict:
+    try:
+        return patch_apply.apply_patch(
+            _directory(target.path), target.file_path, target.function_name
+        )
+    except patch_apply.ApplyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except paths.UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/patches/revert")
+def post_revert(target: PatchTarget) -> dict:
+    try:
+        return patch_apply.revert_patch(
+            _directory(target.path), target.file_path, target.function_name
+        )
+    except patch_apply.ApplyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except paths.UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/source")

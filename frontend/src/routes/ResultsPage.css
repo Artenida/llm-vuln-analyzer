@@ -54,3 +54,13 @@
   margin: var(--s4) 0 var(--s2);
   font-size: var(--fs-xs);
 }
+
+/* Buttons on their own line under a note, so a destructive action is never
+   inline with the sentence explaining what it will overwrite. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}

@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
 import type {
+  AppliedPatch,
+  AppliedPatches,
   CostEstimate,
   CostResponse,
   DirListing,
@@ -226,6 +228,43 @@ export function usePatches(path: string | null, enabled = true) {
     enabled: Boolean(path) && enabled,
   });
 }
+
+export function useAppliedPatches(path: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["patches-applied", path],
+    queryFn: () => api.get<AppliedPatches>("/results/patches/applied", { path: path! }),
+    enabled: Boolean(path) && enabled,
+  });
+}
+
+interface PatchTarget {
+  path: string;
+  file_path: string;
+  function_name: string;
+}
+
+/**
+ * Write one patch into the analysed project, or take it back out.
+ *
+ * The only call in this app that modifies a file outside a result directory, so
+ * it is deliberately per-finding: there is no bulk variant to reach for by
+ * accident. `applied_count` also feeds the results summary, so both queries are
+ * refreshed on success.
+ */
+function usePatchWrite(action: "apply" | "revert") {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (target: PatchTarget) =>
+      api.post<AppliedPatch>(`/results/patches/${action}`, target),
+    onSuccess: (_data, target) => {
+      client.invalidateQueries({ queryKey: ["patches-applied", target.path] });
+      client.invalidateQueries({ queryKey: ["artifact", target.path] });
+    },
+  });
+}
+
+export const useApplyPatch = () => usePatchWrite("apply");
+export const useRevertPatch = () => usePatchWrite("revert");
 
 export function useArtifact(path: string | null, name: string | null) {
   return useQuery({

@@ -3,6 +3,8 @@ import { Link, useSearchParams } from "react-router-dom";
 import { apiUrl } from "@/api/client";
 import {
   useActiveJob,
+  useAppliedPatches,
+  useApplyPatch,
   useArtifact,
   useEvaluationsForRun,
   useExtraction,
@@ -11,9 +13,11 @@ import {
   useHistory,
   usePatches,
   useResult,
+  useRevertPatch,
   useStartPatch,
 } from "@/api/hooks";
 import type {
+  AppliedPatch,
   ExtractedFunction,
   Finding,
   GraphNode,
@@ -923,8 +927,14 @@ function ExtractionTab({ path }: { path: string }) {
 
 // ── patches ──────────────────────────────────────────────────────────────────
 
+/** Same key the backend journals under, so a row and its applied state line up. */
+function patchKey(file: string, fn: string) {
+  return `${file.replace(/\\/g, "/")}::${fn}`;
+}
+
 function PatchesTab({ path, result }: { path: string; result: ResultSummary }) {
   const { data, isLoading, error } = usePatches(path);
+  const { data: applied } = useAppliedPatches(path);
   const startPatch = useStartPatch();
   const { data: activeJob } = useActiveJob();
   const [selected, setSelected] = useState<PatchRecord | null>(null);
@@ -932,6 +942,16 @@ function PatchesTab({ path, result }: { path: string; result: ResultSummary }) {
   const running = activeJob?.kind === "patch" && activeJob.state === "running";
   const patches = data?.patches ?? [];
   const flagged = result.totals.vulnerabilities_found ?? 0;
+
+  const appliedByKey = useMemo(() => {
+    const map = new Map<string, AppliedPatch>();
+    for (const entry of applied?.entries ?? []) {
+      map.set(patchKey(entry.file_path, entry.function_name), entry);
+    }
+    return map;
+  }, [applied]);
+
+  const stateOf = (p: PatchRecord) => appliedByKey.get(patchKey(p.file_path, p.function_name));
 
   const columns: Column<PatchRecord>[] = [
     {
@@ -965,6 +985,17 @@ function PatchesTab({ path, result }: { path: string; result: ResultSummary }) {
         ),
     },
     {
+      id: "applied",
+      header: "Source file",
+      sortValue: (p) => (stateOf(p)?.state === "applied" ? 1 : 0),
+      cell: (p) => {
+        const entry = stateOf(p);
+        if (entry?.state === "applied") return <Badge variant="ok">applied</Badge>;
+        if (entry?.state === "reverted") return <Badge variant="neutral">reverted</Badge>;
+        return <span className="faint">unchanged</span>;
+      },
+    },
+    {
       id: "cost",
       header: "Cost",
       align: "right",
@@ -978,7 +1009,7 @@ function PatchesTab({ path, result }: { path: string; result: ResultSummary }) {
     <div className="stack">
       <Card
         title="Patch generation"
-        description="Asks the model for a unified diff per flagged function, then checks each one parses. Your source files are never modified."
+        description="Asks the model for a unified diff per flagged function, then checks each one parses. Generating changes nothing on disk — open a diff and choose Apply to write that one fix into your source file."
         actions={
           <Button
             variant="primary"
@@ -1013,6 +1044,11 @@ function PatchesTab({ path, result }: { path: string; result: ResultSummary }) {
               label="Invalid"
               value={formatNumber(data.summary.invalid)}
               tone={data.summary.invalid ? "err" : "muted"}
+            />
+            <StatTile
+              label="Applied to source"
+              value={formatNumber(applied?.applied_count ?? 0)}
+              tone={applied?.applied_count ? "ok" : "muted"}
             />
             <StatTile
               label="Cost"
@@ -1059,6 +1095,12 @@ function PatchesTab({ path, result }: { path: string; result: ResultSummary }) {
                       {selected.patch_error}
                     </div>
                   )}
+                  <ApplyControl
+                    key={patchKey(selected.file_path, selected.function_name)}
+                    path={path}
+                    patch={selected}
+                    applied={stateOf(selected) ?? null}
+                  />
                   {selected.unified_diff ? (
                     <DiffView diff={selected.unified_diff} maxHeight={640} />
                   ) : (
@@ -1072,6 +1114,101 @@ function PatchesTab({ path, result }: { path: string; result: ResultSummary }) {
           )
         }
       </QueryBoundary>
+    </div>
+  );
+}
+
+/**
+ * Apply one diff to the analysed project, or take it back out.
+ *
+ * Two-step on the way in: this is the only control in the app that edits a file
+ * the user did not ask it to write, and the confirm step names the file it is
+ * about to overwrite. Applying is per-finding by design — there is no bulk
+ * button here, and the confirm state resets whenever a different patch is
+ * opened (the caller keys this component by patch).
+ */
+function ApplyControl({
+  path,
+  patch,
+  applied,
+}: {
+  path: string;
+  patch: PatchRecord;
+  applied: AppliedPatch | null;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const apply = useApplyPatch();
+  const revert = useRevertPatch();
+  const target = { path, file_path: patch.file_path, function_name: patch.function_name };
+  const busy = apply.isPending || revert.isPending;
+  const failure = (apply.error ?? revert.error) as Error | null;
+
+  if (patch.patch_valid !== true) {
+    return (
+      <div className="note">
+        <span className="note__label">Not applicable</span>
+        Only a patch that passed the syntax check can be written to your source
+        file. Fix this one by hand using the diff below.
+      </div>
+    );
+  }
+
+  const isApplied = applied?.state === "applied";
+
+  return (
+    <div className="stack-sm">
+      {failure && (
+        <div className="note note--error">
+          <span className="note__label">
+            {apply.error ? "Not applied" : "Not reverted"}
+          </span>
+          {failure.message}
+        </div>
+      )}
+
+      {isApplied ? (
+        <div className="note note--ok">
+          <span className="note__label">Applied</span>
+          Written into <span className="mono">{applied?.file_path}</span>
+          {applied?.line ? ` at line ${applied.line}` : ""}
+          {applied?.applied_at ? ` on ${formatDate(applied.applied_at)}` : ""}.
+          <div className="row-actions">
+            <Button variant="default" disabled={busy} onClick={() => revert.mutate(target)}>
+              {revert.isPending ? "Reverting…" : "Revert this change"}
+            </Button>
+          </div>
+        </div>
+      ) : confirming ? (
+        <div className="note">
+          <span className="note__label">Overwrite this function?</span>
+          <span className="mono">{patch.file_path}</span> will be modified in
+          place. {applied?.state === "reverted" && "You reverted this patch before. "}
+          Nothing else in the file changes, and you can revert it from here
+          afterwards.
+          <div className="row-actions">
+            <Button
+              variant="danger"
+              disabled={busy}
+              onClick={() => apply.mutate(target, { onSuccess: () => setConfirming(false) })}
+            >
+              {apply.isPending ? "Writing…" : "Yes, write it"}
+            </Button>
+            <Button variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="row-actions">
+          <Button variant="primary" onClick={() => setConfirming(true)}>
+            Apply to source file
+          </Button>
+          <span className="faint">
+            Rewrites just this function in{" "}
+            <span className="mono">{patch.file_path}</span>.
+          </span>
+        </div>
+      )}
     </div>
   );
 }

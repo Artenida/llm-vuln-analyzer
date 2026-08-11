@@ -42,14 +42,23 @@ def graph_html_file(directory: Path, annotated: bool = True) -> Optional[Path]:
     return None
 
 
+# Written beside the patch artifact, never a patch artifact itself. Kept here
+# rather than imported from `patch_apply` so that module can import this one.
+_NOT_PATCH_ARTIFACTS = {"patches_applied.json", "applied_patches.json"}
+
+
 def patch_file(directory: Path) -> Optional[Path]:
     """The patch artifact in a bundle.
 
     `patch` names its output `<run_id>_patches.json`, so it is found by suffix
     rather than by a fixed name. Newest wins if a run was patched twice.
+
+    A suffix glob will happily match any other file the tool writes beside it,
+    and picking the wrong one here means the Patches tab renders something that
+    is not a patch document. Bundle bookkeeping is excluded by name.
     """
     candidates = sorted(
-        directory.glob("*_patches.json"),
+        (p for p in directory.glob("*_patches.json") if p.name not in _NOT_PATCH_ARTIFACTS),
         key=lambda p: p.stat().st_mtime if p.exists() else 0,
         reverse=True,
     )
