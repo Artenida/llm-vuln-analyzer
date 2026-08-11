@@ -88,6 +88,16 @@ export function AnalyzePage() {
   const running = job?.state === "running";
   const finished = job !== null && job.state !== "running";
 
+  // Remember where this run is writing, so Results and Evaluations open on it
+  // with no `?path` — including after a refresh, and including a run adopted
+  // from the active-job poll rather than started here. This is the whole of
+  // what replaced the run history: one pointer, not a list.
+  useEffect(() => {
+    if (job?.output_dir && job.output_dir !== form.lastResultDir) {
+      update({ lastResultDir: job.output_dir });
+    }
+  }, [job?.output_dir, form.lastResultDir, update]);
+
   const keyConfigured = settingsData?.api_keys.some(
     (k) => k.alias === (settings?.api_key_alias ?? "default") && k.configured,
   );

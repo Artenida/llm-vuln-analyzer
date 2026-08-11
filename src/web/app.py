@@ -58,7 +58,6 @@ def create_app() -> FastAPI:
 
     for module in (settings, fs, jobs, results, cost, evaluations):
         app.include_router(module.router, prefix="/api")
-    app.include_router(cost.history_router, prefix="/api")
 
     # vis-network and pyvis's helpers, vendored in the repo. The call-graph HTML
     # is rewritten to load them from here so it renders inside the iframe and

@@ -4,7 +4,6 @@ import { AnalyzePage } from "./routes/AnalyzePage";
 import { ResultsPage } from "./routes/ResultsPage";
 import { EvaluationsPage } from "./routes/EvaluationsPage";
 import { CostsPage } from "./routes/CostsPage";
-import { HistoryPage } from "./routes/HistoryPage";
 import { SettingsPage } from "./routes/SettingsPage";
 import { NotFoundPage } from "./routes/NotFoundPage";
 
@@ -20,7 +19,6 @@ export function App() {
             this page is addressed by report path, again as a query parameter. */}
         <Route path="evaluations" element={<EvaluationsPage />} />
         <Route path="costs" element={<CostsPage />} />
-        <Route path="history" element={<HistoryPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>

@@ -458,24 +458,6 @@ export interface GroundTruthDataset {
   curation: CurationStatus;
 }
 
-// ── history ──────────────────────────────────────────────────────────────────
-
-export interface HistoryEntry {
-  id: string;
-  output_dir: string;
-  source_path: string | null;
-  label: string;
-  run_id: string | null;
-  model: string | null;
-  timestamp: string | null;
-  state: JobState;
-  total_functions: number | null;
-  vulnerabilities_found: number | null;
-  total_cost_usd: number | null;
-  partial: boolean;
-  exists: boolean;
-}
-
 export interface HealthResponse {
   status: string;
   project_root: string;

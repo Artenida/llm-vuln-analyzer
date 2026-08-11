@@ -6,11 +6,10 @@ import "./AppShell.css";
 
 const NAV = [
   { to: "/", label: "Analyze", glyph: "▶" },
-  // No ?path — Results opens the most recent run on its own, so seeing what you
+  // No ?path — Results opens the run in progress on its own, so seeing what you
   // just ran is one click from anywhere.
   { to: "/results", label: "Results", glyph: "◈" },
   { to: "/evaluations", label: "Evaluations", glyph: "±" },
-  { to: "/history", label: "History", glyph: "▤" },
   { to: "/costs", label: "Costs", glyph: "$" },
   { to: "/settings", label: "Settings", glyph: "⚙" },
 ];

@@ -15,7 +15,6 @@ import type {
   GraphDocument,
   GroundTruthDataset,
   HealthResponse,
-  HistoryEntry,
   InspectResult,
   Job,
   PatchDocument,
@@ -274,7 +273,7 @@ export function useArtifact(path: string | null, name: string | null) {
   });
 }
 
-// ── cost and history ─────────────────────────────────────────────────────────
+// ── cost ───────────────────────────────────────────────────────────────────
 
 export function useCost(runId?: string) {
   return useQuery({
@@ -287,30 +286,6 @@ export function useCostByRun(limit = 25) {
   return useQuery({
     queryKey: ["cost-runs", limit],
     queryFn: () => api.get<import("./types").CostGroup[]>("/cost/runs", { limit }),
-  });
-}
-
-export function useHistory() {
-  return useQuery({
-    queryKey: ["history"],
-    queryFn: () => api.get<HistoryEntry[]>("/history"),
-  });
-}
-
-/** Add a results folder produced elsewhere — another machine, or the CLI. */
-export function useOpenResultsFolder() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (path: string) => api.post<HistoryEntry>("/history/open", { path }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ["history"] }),
-  });
-}
-
-export function useForgetHistory() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (entryId: string) => api.delete(`/history/${entryId}`),
-    onSuccess: () => client.invalidateQueries({ queryKey: ["history"] }),
   });
 }
 

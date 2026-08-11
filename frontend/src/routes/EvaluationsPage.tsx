@@ -6,7 +6,6 @@ import {
   useEvaluations,
   useEvaluationsForRun,
   useGroundTruthDatasets,
-  useHistory,
   useResult,
   useRunEvaluation,
 } from "@/api/hooks";
@@ -16,7 +15,6 @@ import type {
   CweBreakdownRow,
   EvaluationInstance,
   EvaluationReport,
-  HistoryEntry,
   ResultSummary,
   UnmatchedFinding,
   UnresolvedFinding,
@@ -50,6 +48,7 @@ import {
   formatTokens,
   shortPath,
 } from "@/lib/format";
+import { useAnalyzeForm } from "@/state/AnalyzeForm";
 import "./shared/shared.css";
 import "./EvaluationsPage.css";
 
@@ -68,28 +67,18 @@ const CONFUSION: { key: "tp" | "fp" | "fn" | "tn"; label: string; color: string 
  *
  * Addressed by the run's output directory, the same way Results is, so the two
  * pages stay in step and "the run I am looking at" survives a refresh. With no
- * `?path` it opens the most recent run that still exists — the same default
- * Results uses.
+ * `?path` it opens the run this session is working on. There is no run picker:
+ * the UI keeps no list of past runs, so there is nothing to pick between.
  */
 export function EvaluationsPage() {
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const explicitPath = params.get("path");
-  const { data: history, isLoading: historyLoading } = useHistory();
-
-  const runs = useMemo(() => (history ?? []).filter((entry) => entry.exists), [history]);
-  const path = explicitPath ?? runs[0]?.output_dir ?? null;
+  const { form } = useAnalyzeForm();
+  const path = explicitPath ?? form.lastResultDir;
 
   const { data: result, isLoading, error } = useResult(path);
 
-  function open(next: string) {
-    // Changing run drops the report/comparison selection: they belong to the
-    // run that was open, and carrying them over would show one run's header
-    // above another run's numbers.
-    setParams(next ? { path: next } : {}, { replace: true });
-  }
-
   if (!path) {
-    if (historyLoading) return <Skeleton rows={5} />;
     return (
       <EmptyState
         icon="±"
@@ -113,48 +102,27 @@ export function EvaluationsPage() {
         </span>
       </div>
 
-      <RunPicker runs={runs} path={path} onChange={open} />
-
       <QueryBoundary isLoading={isLoading} error={error} data={result} skeletonRows={5}>
-        {(run) => <RunEvaluations path={path} run={run} />}
+        {(run) => (
+          <>
+            <Card>
+              <div className="eval__picker">
+                <span className="dim">
+                  Scoring <span className="mono">{shortPath(path, 2)}</span>
+                </span>
+                <Link
+                  className="eval__crosslink"
+                  to={`/results?path=${encodeURIComponent(path)}`}
+                >
+                  Open in Results ↗
+                </Link>
+              </div>
+            </Card>
+            <RunEvaluations path={path} run={run} />
+          </>
+        )}
       </QueryBoundary>
     </div>
-  );
-}
-
-function RunPicker({
-  runs,
-  path,
-  onChange,
-}: {
-  runs: HistoryEntry[];
-  path: string;
-  onChange: (path: string) => void;
-}) {
-  const known = runs.some((entry) => entry.output_dir === path);
-  return (
-    <Card>
-      <div className="eval__picker">
-        <Field label="Run">
-          <Select
-            value={path}
-            onChange={onChange}
-            options={[
-              // A ?path pointing outside history still opens; it just gets its
-              // own entry rather than silently snapping to another run.
-              ...(known ? [] : [{ value: path, label: shortPath(path, 2) }]),
-              ...runs.map((entry) => ({
-                value: entry.output_dir,
-                label: `${entry.label}${entry.run_id ? ` — ${entry.run_id}` : ""}`,
-              })),
-            ]}
-          />
-        </Field>
-        <Link className="eval__crosslink" to={`/results?path=${encodeURIComponent(path)}`}>
-          Open in Results ↗
-        </Link>
-      </div>
-    </Card>
   );
 }
 
@@ -830,8 +798,7 @@ function ScoreRunCard({
           The report is written to{" "}
           <code>experiments/datasets/&lt;dataset&gt;/evaluations/</code>, the same
           place the <code>evaluate</code> command writes it. Nothing else is
-          modified. Re-scoring overwrites this run's existing report.{" "}
-          <Link to="/history">See all runs →</Link>
+          modified. Re-scoring overwrites this run's existing report.
         </p>
       </div>
     </Card>

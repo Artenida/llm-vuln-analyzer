@@ -28,6 +28,17 @@ export interface AnalyzeFormState {
   /** The last run started from this form, so progress is still shown on return. */
   jobId: string | null;
   /**
+   * Output directory of the run currently being looked at.
+   *
+   * This is what Results and Evaluations open with no explicit `?path`. It
+   * replaces the run history the UI used to keep: the flow is one codebase,
+   * one analysis, that run's results, so there is exactly one run to point at
+   * rather than a list to choose from. Kept separate from `outputDir`, which
+   * is an editable form field — retyping where the *next* run should go must
+   * not change which finished run you are reading.
+   */
+  lastResultDir: string | null;
+  /**
    * Whether Settings defaults have been applied. Without this the defaults
    * would re-apply on every mount and silently overwrite your choices each
    * time you came back to the page.
@@ -46,6 +57,7 @@ const EMPTY: AnalyzeFormState = {
   inspection: null,
   estimate: null,
   jobId: null,
+  lastResultDir: null,
   seededFromSettings: false,
 };
 

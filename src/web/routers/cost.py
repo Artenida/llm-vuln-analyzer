@@ -13,10 +13,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Query
 
-from src.web import jobs as job_module
 from src.web import paths
 
 router = APIRouter(prefix="/cost", tags=["cost"])
@@ -76,44 +74,3 @@ def cost_summary(run_id: Optional[str] = Query(None)) -> dict:
 def cost_by_run(limit: int = Query(25, ge=1, le=200)) -> list[dict]:
     ledger = _ledger()
     return [_row(r) for r in ledger.by_run(limit=limit)] if ledger else []
-
-
-# ── history ───────────────────────────────────────────────────────────────────
-# Lives here rather than in its own module: History is the dashboard's "what did
-# I run" half, and it is a dozen lines.
-
-history_router = APIRouter(prefix="/history", tags=["history"])
-
-
-class OpenRequest(BaseModel):
-    path: str
-
-
-@history_router.get("")
-def list_history() -> list[dict]:
-    """Every result this install can see.
-
-    Merges what was recorded with a scan of the workspace, so losing the
-    registry file — or copying a workspace over from another machine — does not
-    make results disappear.
-    """
-    return job_module.discover_history()
-
-
-@history_router.post("/open")
-def open_results(request: OpenRequest) -> dict:
-    """Add a results folder produced elsewhere (another machine, or the CLI)."""
-    try:
-        directory = paths.normalise(request.path)
-    except paths.UnsafePathError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    try:
-        return job_module.remember_result_dir(directory)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@history_router.delete("/{entry_id}")
-def forget(entry_id: str) -> dict:
-    """Remove an entry from the list. The result files are never deleted."""
-    return {"forgotten": job_module.forget_history(entry_id)}

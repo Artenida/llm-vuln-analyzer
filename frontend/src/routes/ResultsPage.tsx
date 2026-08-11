@@ -10,7 +10,6 @@ import {
   useExtraction,
   useFindings,
   useGraph,
-  useHistory,
   usePatches,
   useResult,
   useRevertPatch,
@@ -56,25 +55,21 @@ import {
   formatRatio,
   formatTokens,
 } from "@/lib/format";
+import { useAnalyzeForm } from "@/state/AnalyzeForm";
 import "./ResultsPage.css";
 
 export function ResultsPage() {
   const [params] = useSearchParams();
   const explicitPath = params.get("path");
-  const { data: history, isLoading: historyLoading } = useHistory();
-
-  // With no ?path, open the most recent result that still exists on disk, so
-  // "Results" in the sidebar is a one-click route to what you just ran.
-  const latest = useMemo(
-    () => history?.find((entry) => entry.exists)?.output_dir ?? null,
-    [history],
-  );
-  const path = explicitPath ?? latest;
+  // With no ?path, open the run this session is working on. There is no list of
+  // past runs to fall back to — the flow is one codebase, one analysis, that
+  // run's results — so the pointer the Analyze page keeps is the whole answer.
+  const { form } = useAnalyzeForm();
+  const path = explicitPath ?? form.lastResultDir;
 
   const { data, isLoading, error } = useResult(path);
 
   if (!path) {
-    if (historyLoading) return <Skeleton rows={5} />;
     return (
       <EmptyState
         icon="▶"

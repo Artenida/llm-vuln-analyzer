@@ -26,11 +26,11 @@ from typing import Any, Optional
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def ui_state_dir() -> Path:
-    """Where the UI keeps its own state (settings, history, root registry).
+    """Where the UI keeps its own state (settings and the root registry).
 
     Separate from experiments/ so the thesis tree is untouched by using the UI.
     Overridable with VULN_ANALYZER_UI_STATE so tests never touch real state —
-    deleting a user's run history to run a test is not an acceptable trade.
+    deleting a user's saved settings to run a test is not an acceptable trade.
     """
     override = os.environ.get("VULN_ANALYZER_UI_STATE")
     return Path(override).resolve() if override else PROJECT_ROOT / ".vulnui"
@@ -127,8 +127,9 @@ def safe_join(base: Path, name: str) -> Path:
 
 # ── result-directory registry ─────────────────────────────────────────────────
 #
-# Populated by the job runner (every analysis registers its output directory)
-# and by history. Reads are confined to it.
+# Populated by the job runner: every analysis registers its output directory
+# when it finishes. Reads are confined to it, so this is what keeps the last
+# run readable across a browser refresh or a server restart.
 
 
 def _registry_file() -> Path:

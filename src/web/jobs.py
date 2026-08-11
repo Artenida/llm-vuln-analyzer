@@ -37,9 +37,6 @@ logger = logging.getLogger(__name__)
 
 JobState = Literal["running", "succeeded", "failed", "cancelled"]
 
-def history_file() -> Path:
-    return paths.ui_state_dir() / "history.json"
-
 # Keep the tail of a job's log in memory. A 379-function run prints a few
 # thousand lines; this is enough to review one without holding every run's
 # entire output for the lifetime of the process.
@@ -245,16 +242,16 @@ class JobManager:
         job._process = None
 
         if state in ("succeeded", "cancelled") and job.output_dir:
-            # A cancelled analysis still wrote a partial run worth reading, so
-            # it is registered and recorded exactly like a completed one.
+            # Registering the output directory is what makes the run readable
+            # through /api/results — reads are confined to a registry of
+            # directories this tool has written to. A cancelled analysis still
+            # wrote a partial run worth reading, so it is registered too.
             try:
                 directory = Path(job.output_dir)
                 if directory.is_dir():
                     paths.register_root(directory)
-                    if job.kind == "analyze":
-                        record_history(job)
             except Exception as exc:  # never let bookkeeping fail a finished run
-                logger.warning("Could not record job %s in history: %s", job.id, exc)
+                logger.warning("Could not register output of job %s: %s", job.id, exc)
 
         self._emit(job, {"type": "finished", "job": job.public()})
 
@@ -422,166 +419,6 @@ def build_patch_argv(
         if not re.fullmatch(r"[A-Za-z0-9_]{1,32}", api_key_alias):
             raise ArgumentError("Invalid API key alias.")
     return argv
-
-
-# ── history ───────────────────────────────────────────────────────────────────
-#
-# Results can be written anywhere, so a registry is the only way a run from last
-# week is still findable. It records where a result is, never a copy of it.
-
-
-def load_history() -> list[dict]:
-    data = paths.read_json(history_file())
-    return [entry for entry in data if isinstance(entry, dict)] if isinstance(data, list) else []
-
-
-def _summarise_result_dir(directory: Path, entry_id: str, **overrides) -> dict:
-    """Build a history row by reading the result folder itself."""
-    analysis = paths.read_json(directory / "analysis.json") or {}
-    summary = analysis.get("summary") or {}
-    extraction = (paths.read_json(directory / "extraction.json") or {}).get("summary") or {}
-
-    row = {
-        "id": entry_id,
-        "output_dir": str(directory),
-        "source_path": analysis.get("source_path"),
-        "label": directory.name,
-        "run_id": analysis.get("run_id"),
-        "model": analysis.get("model"),
-        "timestamp": analysis.get("timestamp"),
-        "state": "succeeded",
-        # A dry run writes no analysis.json but does extract functions — falling
-        # back keeps its row from reading as an empty failure.
-        "total_functions": summary.get("total_functions") or extraction.get("functions_found"),
-        "vulnerabilities_found": summary.get("vulnerabilities_found"),
-        "total_cost_usd": summary.get("total_cost_usd"),
-        "partial": bool((analysis.get("meta") or {}).get("partial_run")),
-        "analysis": bool(analysis),
-    }
-    row.update(overrides)
-    return row
-
-
-def discover_history() -> list[dict]:
-    """Every result this install can see, recorded or not.
-
-    The registry file is a convenience, not the source of truth: it can be
-    deleted, or a workspace can be copied in from another machine. So the
-    recorded entries are merged with a scan of the workspace for folders that
-    actually contain a result. Whatever is on disk wins for the numbers — a
-    recorded row can be stale, the folder cannot.
-    """
-    by_dir: dict[str, dict] = {}
-
-    for entry in load_history():
-        directory = entry.get("output_dir")
-        if not directory:
-            continue
-        path = Path(directory)
-        key = str(path).lower()
-        if path.is_dir() and paths.looks_like_result_dir(path):
-            # Re-read from disk, keeping the recorded id/label/state, which carry
-            # information the folder does not (a cancelled run still looks fine).
-            by_dir[key] = _summarise_result_dir(
-                path,
-                entry.get("id") or uuid.uuid4().hex[:12],
-                label=entry.get("label") or path.name,
-                state=entry.get("state") or "succeeded",
-                source_path=entry.get("source_path") or None,
-            )
-        else:
-            by_dir[key] = {**entry, "exists": False}
-
-    # Scan only the workspace, never the whole experiments tree: this UI is not
-    # an experiment browser, and surfacing the archived thesis runs here would
-    # be exactly the thing it is meant not to do.
-    try:
-        from src.web.settings_store import workspace_dir
-
-        workspace = workspace_dir()
-        if workspace.is_dir():
-            for child in sorted(workspace.iterdir()):
-                if not child.is_dir() or not paths.looks_like_result_dir(child):
-                    continue
-                key = str(child).lower()
-                if key not in by_dir:
-                    by_dir[key] = _summarise_result_dir(child, uuid.uuid4().hex[:12])
-    except Exception as exc:  # a scan failure must not empty the list
-        logger.warning("Could not scan the workspace for results: %s", exc)
-
-    rows = []
-    for row in by_dir.values():
-        row.setdefault("exists", Path(row["output_dir"]).is_dir())
-        rows.append(row)
-    rows.sort(key=lambda r: (r.get("timestamp") or "", r.get("output_dir") or ""), reverse=True)
-    return rows
-
-
-def remember_result_dir(directory: Path) -> dict:
-    """Record a result folder the user opened by hand.
-
-    Lets someone point the UI at results produced elsewhere — another machine,
-    a colleague, or a run started from the command line.
-    """
-    directory = directory.resolve()
-    if not directory.is_dir():
-        raise ValueError(f"No such folder: {directory}")
-    if not paths.looks_like_result_dir(directory):
-        raise ValueError(
-            "That folder has no analysis results in it "
-            "(expected analysis.json, extraction.json or call_graph.json)."
-        )
-
-    paths.register_root(directory)
-    entry = _summarise_result_dir(directory, uuid.uuid4().hex[:12])
-    history = [e for e in load_history() if e.get("output_dir") != entry["output_dir"]]
-    history.insert(0, entry)
-    paths.write_json(history_file(), history[:200])
-    return entry
-
-
-def record_history(job: Job) -> None:
-    if not job.output_dir:
-        return
-    directory = Path(job.output_dir).resolve()
-    analysis = paths.read_json(directory / "analysis.json") or {}
-    summary = analysis.get("summary") or {}
-
-    # A dry run produces no analysis.json but does extract functions. Falling
-    # back to the extraction count keeps its history row from reading as an
-    # empty failure.
-    extraction_summary = (paths.read_json(directory / "extraction.json") or {}).get("summary") or {}
-
-    entry = {
-        "id": job.id,
-        "output_dir": str(directory),
-        "source_path": job.source_path,
-        "label": job.label,
-        "run_id": analysis.get("run_id"),
-        "model": analysis.get("model"),
-        "timestamp": analysis.get("timestamp") or job.finished_at,
-        "state": job.state,
-        "total_functions": summary.get("total_functions")
-                           or extraction_summary.get("functions_found"),
-        "vulnerabilities_found": summary.get("vulnerabilities_found"),
-        "total_cost_usd": summary.get("total_cost_usd"),
-        "partial": bool((analysis.get("meta") or {}).get("partial_run")),
-        "analysis": bool(analysis),
-    }
-
-    history = [e for e in load_history() if e.get("output_dir") != entry["output_dir"]]
-    history.insert(0, entry)
-    paths.write_json(history_file(), history[:200])
-
-
-def forget_history(entry_id: str) -> bool:
-    """Remove an entry from the list. Never deletes the result files."""
-    history = load_history()
-    remaining = [e for e in history if e.get("id") != entry_id]
-    if len(remaining) == len(history):
-        return False
-    paths.write_json(history_file(), remaining)
-    return True
 
 
 manager = JobManager()

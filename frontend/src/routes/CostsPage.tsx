@@ -1,4 +1,4 @@
-import { useCost, useCostByRun, useHistory } from "@/api/hooks";
+import { useCost, useCostByRun } from "@/api/hooks";
 import type { CostGroup } from "@/api/types";
 import {
   Card,
@@ -32,7 +32,6 @@ const PHASE_COLORS: Record<string, string> = {
 export function CostsPage() {
   const { data, isLoading, error } = useCost();
   const { data: runs } = useCostByRun(25);
-  const { data: history } = useHistory();
 
   return (
     <div className="stack">
@@ -76,7 +75,10 @@ export function CostsPage() {
                   value={formatTokens(cost.total?.total_tokens)}
                   hint={`${formatTokens(cost.total?.prompt_tokens)} in · ${formatTokens(cost.total?.completion_tokens)} out`}
                 />
-                <StatTile label="Analyses run" value={formatNumber(history?.length ?? 0)} />
+                {/* Runs are counted from the ledger, not from a list of past
+                    runs: the UI keeps no history, and the ledger is the source
+                    of truth the CLI's `cost` command already uses. */}
+                <StatTile label="Runs billed" value={formatNumber(runs?.length ?? 0)} />
               </div>
 
               <Card

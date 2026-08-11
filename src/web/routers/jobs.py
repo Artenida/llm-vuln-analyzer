@@ -79,8 +79,8 @@ def start_analyze(request: AnalyzeRequest) -> dict:
             )
         logger.debug("Analysis will use the %s key from %s", alias, source)
 
-    # Normalised once, here, and used for the argv, the registry, the job record
-    # and history alike — a relative path recorded anywhere would resolve against
+    # Normalised once, here, and used for the argv, the registry and the job
+    # record alike — a relative path recorded anywhere would resolve against
     # whatever the current directory happened to be when it was later read.
     try:
         output_dir = (

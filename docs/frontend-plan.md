@@ -1,8 +1,11 @@
 # Frontend Plan — Web UI for LLM-Vuln-Analyzer
 
 > **Status:** Sprints 8–11 complete (2026-08-01). The product was rescoped from
-> experiment-browsing to analyze-first on the same day — see §8. Sprint 12
-> (polish) outstanding, plus two exit criteria that need a live API key.
+> experiment-browsing to analyze-first on the same day — see §8 — and narrowed
+> again on 2026-08-11, when the History page was removed so the flow is one
+> codebase, one analysis, that run's results (§10). Per-diff patch Apply landed
+> the same day (§9). Sprint 12 (polish) outstanding, plus two exit criteria that
+> need a live API key.
 > Sprint numbering continues [`sprint-plan.md`](sprint-plan.md) (1–7 are the
 > analysis engine).
 
@@ -24,8 +27,7 @@ pick a folder  →  choose options  →  Analyze  →  watch it run
 ```
 
 Supporting screens exist because that loop needs them: a **Dashboard** for what
-it all cost, **Settings** for the API key and analysis options, and **History**
-so a result you produced yesterday is still reachable.
+it all cost, and **Settings** for the API key and analysis options.
 
 ### What it is not
 
@@ -58,7 +60,7 @@ so a result you produced yesterday is still reachable.
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │  Browser — React 19 + TypeScript SPA (Vite)                    │
-│  Analyze · Results · Dashboard · History · Settings            │
+│  Analyze · Results · Evaluations · Costs · Settings             │
 └──────────────────┬────────────────────────────────────────────┘
                    │  fetch /api/*        EventSource /api/jobs/{id}/events
 ┌──────────────────▼────────────────────────────────────────────┐
@@ -89,8 +91,7 @@ per-function lines `analyze` already prints.
 
 The user picks where a run's output goes. `paths.py` therefore keeps a
 **registry of allowed roots** (the default results directory, plus any output
-directory an active job or a history entry refers to) instead of one hardcoded
-root. Artifact reads are anchored to that registry; the directory *browser* is
+directory a job has written to) instead of one hardcoded root. Artifact reads are anchored to that registry; the directory *browser* is
 separately allowed to list anywhere, since browsing to a folder is its job.
 
 ---
@@ -158,7 +159,7 @@ findings.
 | **Analyze** | Confirm dialog stating projected cost and output path → job starts. |
 | **Live progress** | Function counter and progress bar parsed from the CLI's own per-function output, a streaming log, running spend, and Cancel (which leaves a resumable checkpoint). |
 
-### 5.2 Results — `/results/:jobId` (and reachable from History)
+### 5.2 Results — `/results?path=`
 
 Tabs. Every field of every artifact appears somewhere.
 
@@ -179,14 +180,7 @@ from `CostLedger`, which is already the source of truth for the CLI's `cost`
 command. Recent analyses with their cost. A group whose pricing is unknown
 renders `n/a`, never `$0.00` — an unpriced model is not a free one.
 
-### 5.4 History — `/history`
-
-The analyses you have run, wherever their output was written. Backed by a small
-registry file the job runner appends to (output path, run id, model, mode,
-counts, cost, timestamp), so a result outside `experiments/` is still findable.
-Entries can be removed from the list without deleting the files.
-
-### 5.5 Settings — `/settings`
+### 5.4 Settings — `/settings`
 
 | Group | Fields |
 |---|---|
@@ -228,8 +222,6 @@ GET  /api/results/artifacts?path=      file list + raw JSON passthrough
 
 GET  /api/cost                     total · by phase · by model · by key
 GET  /api/cost/runs
-GET  /api/history                  saved analyses
-DELETE /api/history/{id}           forget an entry (never deletes files)
 ```
 
 **Argument safety.** Job arguments are built from a whitelist of known flags with
@@ -260,7 +252,7 @@ experiment-browsing pages built in this sprint are removed in 9 (§8).
 - **9.2** `settings_store.py` — config persistence + API key to `.env`; settings API.
 - **9.3** `fs.py` — directory roots, listing, inspect (file/language/function estimate).
 - **9.4** `jobs.py` — whitelisted subprocess runner, log capture, progress parsing,
-  cancel, SSE bus, history registry.
+  cancel, SSE bus, output-directory registry.
 - **9.5** Frontend: `DirectoryPicker`, form primitives, `LogStream`.
 - **9.6** **Analyze page** end to end: pick → options → cost confirm → live run.
 - **9.7** Settings page.
@@ -318,7 +310,8 @@ the end-to-end case is not.
 
 - **11.1** Patch job + Patches tab with rendered diffs and validity.
 - **11.2** Dashboard: total and per-phase cost, by model, by key, by run.
-- **11.3** History page and registry.
+- **11.3** Output-directory registry. *(A History page was built here and
+  removed later — see §10.)*
 
 **Exit criteria**
 - [x] Patches generate from a button and render as diffs; generating leaves the
@@ -326,7 +319,8 @@ the end-to-end case is not.
       per-diff Apply, added later, is the only write; see §9)
 - [x] Dashboard figures come from `CostLedger` directly, so they cannot diverge
       from `python -m src.cli cost`; `n/a` groups are preserved
-- [x] A result written outside `experiments/` is still reachable from History
+- [x] A result written outside `experiments/` is still readable — the job
+      runner registers its output directory, which is what authorises the read
 - [ ] A patch run driven from the UI end to end — needs a live key, same gap as
       the mid-loop cancel above
 
@@ -420,3 +414,58 @@ Covered by `tests/test_patch_apply.py` (17 tests, weighted towards the refusals:
 a wrong write here corrupts a source tree while looking like a successful fix).
 **Not yet checked in a real browser** — see *Browser verification* above; the
 API path and the engine are tested, the rendered control is not.
+
+---
+
+## 10. History removed — the flow is one run
+
+The UI kept a list of every analysis it could find: a **History** page, a
+`history.json` in `.vulnui/`, `GET|POST|DELETE /api/history`, and a workspace
+scan that merged recorded entries with any result folder it discovered. Removed
+on request. The flow is meant to be one thing:
+
+```
+pick a codebase  →  analyze  →  read that run's results
+```
+
+A list of previous runs is a second, competing way to navigate, and it pulled
+the product back towards the experiment browser the rescope in §8 already
+rejected once.
+
+### What replaced it
+
+One pointer, `lastResultDir`, in the Analyze form state
+(`frontend/src/state/AnalyzeForm.tsx`, mirrored to localStorage like the rest of
+that state). It is set from `job.output_dir` whenever a job is known — started
+here, adopted from the active-job poll after a refresh, or finished. **Results**
+and **Evaluations** open on it when no `?path` is given; both still accept an
+explicit `?path`, so a run is still linkable and the two pages stay in step.
+
+Evaluations loses its run picker with it — there is no list to pick from. It now
+shows which run it is scoring and a link across to Results.
+
+### What deliberately stayed
+
+**`paths.register_root()` and the root registry.** This is easy to mistake for
+part of History and it is not: it is the *authorisation* for reading a result.
+Artifact reads are confined to directories this tool has written to, so the job
+runner must still register an output directory when a run finishes, or the run
+that just completed could not be read back. It records where a result is, never
+a copy of it, and nothing lists it.
+
+That split is also what makes the last run survive a **server restart**: the
+pointer is in the browser's localStorage, the read authorisation is in
+`roots.json`, and neither needed a history list to work.
+
+### Consequences worth knowing
+
+* An existing `.vulnui/history.json` is now dead. Nothing reads or writes it; it
+  is left in place rather than deleted, since it is the user's file.
+* **Results produced elsewhere are no longer openable.** `POST /api/history/open`
+  was the recovery path for a result from another machine, a lost registry, or a
+  CLI run — it is gone with the rest. Opening those is a CLI job now. If that
+  turns out to matter, it comes back as an "open a results folder" action on the
+  Analyze page, not as a list of past runs.
+* `Runs billed` on the Costs page counts ledger rows rather than history rows.
+  The ledger is the same source `python -m src.cli cost` uses, so the figure
+  still cannot disagree with the CLI.

@@ -81,7 +81,6 @@ export function useJobStream(jobId: string | null): JobStreamState {
         source.close();
         // The run just wrote files — every result and cost view is now stale.
         queryClient.invalidateQueries({ queryKey: ["jobs"] });
-        queryClient.invalidateQueries({ queryKey: ["history"] });
         queryClient.invalidateQueries({ queryKey: ["cost"] });
         queryClient.invalidateQueries({ queryKey: ["result"] });
         queryClient.invalidateQueries({ queryKey: ["findings"] });
