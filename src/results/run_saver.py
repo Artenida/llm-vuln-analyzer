@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from src.llm import evidence_gate
 from src.llm.client import VulnerabilityReport
 from src.llm.pricing import TokenUsage, estimate_cost
 from src.models import CodeSample
@@ -57,6 +58,17 @@ def save_run(
     errors = sum(1 for r in reports if r.error is not None)
     hallucinated = sum(1 for r in reports if r.hallucination_flag)
 
+    # Whether each flagged flow-CWE finding named the source of the untrusted
+    # data, as the prompt requires. Recorded, never used to drop a finding:
+    # suppressing here would move recall as well as precision and make the
+    # gate's own effect unreadable.
+    gate_verdicts = [
+        evidence_gate.evaluate(r.cwe_id, r.vulnerability_found, r.explanation)
+        for r in reports
+    ]
+    gated = sum(1 for v in gate_verdicts if v != evidence_gate.NOT_APPLICABLE)
+    gate_missing = sum(1 for v in gate_verdicts if v == evidence_gate.MISSING_SOURCE)
+
     total_usage = TokenUsage()
     for r in reports:
         total_usage = total_usage + (r.token_usage or TokenUsage())
@@ -77,6 +89,11 @@ def save_run(
             "clean": total - found - errors,
             "errors": errors,
             "hallucinated": hallucinated,
+            # Kept separate from `hallucinated` on purpose: hallucination_rate is
+            # a reported metric with an established meaning, and folding a new
+            # signal into it would make this run incomparable with the baseline.
+            "flow_findings": gated,
+            "flow_findings_without_source": gate_missing,
             "total_prompt_tokens": total_usage.prompt_tokens,
             "total_completion_tokens": total_usage.completion_tokens,
             "total_tokens": total_usage.total_tokens,
@@ -108,7 +125,7 @@ def save_run(
     group_counts = Counter(g for g in finding_groups if g is not None)
     duplicate_groups = {g for g, c in group_counts.items() if c > 1}
 
-    for report, group_id in zip(reports, finding_groups):
+    for report, group_id, gate_verdict in zip(reports, finding_groups, gate_verdicts):
         # clamp affected_lines to the actual line range of the function
         raw_lines = report.affected_lines or []
         key = (report.function_name, report.file_path)
@@ -147,6 +164,11 @@ def save_run(
             "patch_suggestion":    report.patch_suggestion,
             "confidence":          report.confidence,
             "hallucination_flag":  report.hallucination_flag,
+            # "satisfied" | "missing_source" | "not_applicable" — see
+            # src/llm/evidence_gate.py. "missing_source" means the model claimed
+            # a flow-dependent CWE without naming where the untrusted data enters.
+            "evidence_gate":       gate_verdict,
+            "declared_source":     evidence_gate.declared_source(report.explanation),
             "analysis_mode":       report.analysis_mode,
             "error":               report.error,
             "duplicate_group":     group_id if is_dup else None,

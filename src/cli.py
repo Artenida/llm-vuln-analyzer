@@ -90,6 +90,7 @@ from src.context.call_graph import nodes_to_dict
 from src.context.route_context import format_route_block
 from src.llm.client import LLMClient
 from src.llm.cost_ledger import CostLedger
+from src.llm.evidence_gate import EVIDENCE_GATE_PROMPT
 from src.llm.pricing import TokenUsage, estimate_cost
 from src.agent.react_loop import ReActAgent, MAX_STEPS
 from src.agent.tools import ToolSet
@@ -671,6 +672,7 @@ def _build_context_prompt(
         "  CWE-208  Non-constant-time comparison of secrets (timing attack)\n"
         "  CWE-269  Role or privilege accepted directly from user-controlled input\n"
         "  NOTE: CWE-290 is for relay/reflection attacks — NOT for static bypass codes; use CWE-798.\n"
+        "\n" + EVIDENCE_GATE_PROMPT +
         "\nSeverity rules — consistent for the same CWE:\n"
         "  high   → CWE-89, CWE-347, CWE-798\n"
         "  medium → CWE-20, CWE-208, CWE-269, CWE-306\n"

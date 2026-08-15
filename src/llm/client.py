@@ -17,6 +17,7 @@ import openai
 from src.config import LLMConfig
 from src.context.route_context import format_route_block
 from src.llm.cost_ledger import CostLedger
+from src.llm.evidence_gate import EVIDENCE_GATE_PROMPT
 from src.llm.pricing import TokenUsage, estimate_cost, extract_usage
 from src.models import CodeSample
 
@@ -194,6 +195,7 @@ CWE assignment rules — use the MOST SPECIFIC applicable CWE:
   NOTE: CWE-290 is for relay/reflection spoofing attacks — do NOT use it for static bypass codes
         or hardcoded admin secrets; use CWE-798 instead.
 
+""" + EVIDENCE_GATE_PROMPT + """
 Severity rules — apply consistently for the same CWE:
   high     CWE-89, CWE-347, CWE-798, CWE-639, CWE-862, CWE-95, CWE-256
   medium   CWE-20, CWE-208, CWE-269, CWE-306, CWE-841, CWE-915, CWE-362, CWE-79,

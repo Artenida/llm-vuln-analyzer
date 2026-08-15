@@ -6,7 +6,8 @@
 |---|---|
 | 0 · Measurement harness + dataset hygiene | **applied** 2026-08-15 |
 | 1 · Route & middleware context | **applied** 2026-08-15, code only — not yet re-measured |
-| 2–7 | not started |
+| 2 · Evidence gate for flow CWEs | **applied** 2026-08-15, code only — not yet re-measured |
+| 3–7 | not started |
 
 Stage 1 is implemented and verified against a `--dry-run` extraction of
 juice-shop (111 functions now carry route registrations, 28 of them with a
@@ -359,13 +360,90 @@ finding — it makes the failure countable, and `hallucination_rate` (currently
 
 −8 FP. Precision alone: 0.519 → 0.579; combined with Stage 1: ≈0.72.
 
+### Measured reach, before the re-run — APPLIED 2026-08-15
+
+Replaying the gate's CWE set over the frozen baseline (no LLM calls; this only
+asks which findings the gate would *apply* to):
+
+**It touches 28 of the 77 flagged findings — 17 TP and 13 FP.**
+
+| CWE | TP | FP |
+|---|---|---|
+| CWE-117 | 0 | **8** |
+| CWE-22 | 5 | 2 |
+| CWE-79 | 3 | 3 |
+| CWE-89 | 3 | 0 |
+| CWE-95 | 3 | 0 |
+| CWE-611 | 2 | 0 |
+| CWE-918 | 1 | 0 |
+
+Three corrections to the estimate above:
+
+1. **The ceiling is −13 FP, not −8.** CWE-117 is the cluster, but CWE-22 and
+   CWE-79 contribute five more.
+2. **The risk is four times what §Risk claimed.** I named three CWE-22 true
+   positives as the canaries; there are in fact **17 true positives inside the
+   gate's scope**, spread over seven CWEs. A gate worded too broadly takes them
+   with it, and that would cost more recall than the precision it buys.
+3. **The separation is structural, which is the encouraging part.** Every one of
+   the 13 false positives sits in `data/`, `lib/` or `lib/startup/` — bootstrap,
+   config-validation and internal utility code with no request in scope at all.
+   Every one of the 17 true positives is in `routes/` (or `lib/xml.ts`,
+   `models/user.ts`) and reads `req.*` directly, so it satisfies clause (b)
+   without needing a taint path. The gate is asking a question whose answer
+   already differs sharply between the two groups.
+
+**Pre-registered canaries — these 17 must not flip to FN:**
+
+```
+CWE-611  lib/xml.ts::parseXmlString              CWE-22   routes/keyserver.ts::serveKeyFiles
+CWE-79   models/user.ts::set                     CWE-22   routes/logfileserver.ts::serveLogFiles
+CWE-95   routes/b2border.ts::b2bOrder            CWE-89   routes/login.ts::login
+CWE-22   routes/fileserver.ts::verify            CWE-918  routes/profileimageurlupload.ts::profileImageUrlUpload
+CWE-22   routes/fileupload.ts::extractZipBuffer  CWE-22   routes/quarantineserver.ts::serveQuarantineFiles
+CWE-611  routes/fileupload.ts::handleXmlUpload   CWE-89   routes/search.ts::searchProducts
+CWE-95   routes/showproductreviews.ts::showProductReviews   CWE-89   routes/trackorder.ts::trackOrder
+CWE-95   routes/userprofile.ts::getUserProfile   CWE-79   routes/videohandler.ts::promotionVideo
+```
+
+Note `models/user.ts::set` appears in both lists — different rows (the CWE-79
+email setter is a true positive, the sanitizeLegacy attribution is not).
+
+### Deviation from the plan as written
+
+§Changes said to set `hallucination_flag = True` on a finding that fails the
+gate. **Not done, deliberately.** `hallucination_rate` is a reported metric with
+an established meaning ("of everything it flagged, how much was fabricated"), and
+quietly changing what feeds it would make the baseline and every later run
+incomparable — the exact failure Stage 0 exists to prevent.
+
+Instead each finding carries its own field:
+
+- `evidence_gate`: `"satisfied"` | `"missing_source"` | `"not_applicable"`
+- `declared_source`: the text of the SOURCE line, for auditing
+- run summary: `flow_findings`, `flow_findings_without_source`
+- evaluation report: `evidence_gate_breakdown`, giving TP/FP/precision per verdict
+
+That breakdown is the number that decides whether the gate should ever become a
+suppression rule. If `missing_source` findings turn out to be overwhelmingly
+false positives, an unsubstantiated flow claim is a usable precision signal; if
+they are a mix, this stays a reporting field. Nothing is suppressed either way —
+dropping findings here would move recall as well as precision and make the
+stage's own effect unreadable.
+
+Runs made before the gate existed report an empty breakdown rather than a
+re-derived one: scoring the old prompt against a rule it was never given would
+be measuring the wrong thing.
+
 ### Risk
 
-Over-gating suppresses real flow bugs whose source is one hop away. The three
-current CWE-22 true positives (`serveLogFiles`, `serveKeyFiles`,
-`serveQuarantineFiles`) all read `req.params` directly, so they satisfy clause
-(b) and should survive. Confirm they do — if they flip to FN, clause (b) is
-mis-worded.
+Over-gating suppresses real flow bugs whose source is one hop away — see the
+17 canaries above, which is the real exposure. The CWE-22 true positives
+(`serveLogFiles`, `serveKeyFiles`, `serveQuarantineFiles`) all read `req.params`
+directly and should satisfy clause (b); if they flip to FN, clause (b) is
+mis-worded. Because nothing is suppressed, a first re-run cannot lose recall to
+this stage at all — it can only reveal how often the model substantiates its own
+flow claims. That is the intended order: measure, then decide about enforcement.
 
 ---
 

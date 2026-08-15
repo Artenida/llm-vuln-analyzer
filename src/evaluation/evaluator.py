@@ -48,6 +48,9 @@ class InstanceVerdict:
     outcome: str                        # "TP" | "FP" | "FN" | "TN"
     cwe_correct: Optional[bool]         # only meaningful when outcome == "TP"
     hallucination_flag: bool = False
+    # "satisfied" | "missing_source" | "not_applicable" | None (runs predating
+    # the evidence gate). See src/llm/evidence_gate.py.
+    evidence_gate: Optional[str] = None
 
 
 def _score_instance(gt: GroundTruthEntry, finding: Optional[dict]) -> InstanceVerdict:
@@ -58,11 +61,13 @@ def _score_instance(gt: GroundTruthEntry, finding: Optional[dict]) -> InstanceVe
         outcome = "FN" if gt.vulnerable else "TN"
         cwe_correct = None
         hallucination = False
+        gate = None
     else:
         predicted_vulnerable = bool(finding.get("vulnerability_found"))
         predicted_cwe = finding.get("cwe_id")
         analyzed = True
         hallucination = bool(finding.get("hallucination_flag"))
+        gate = finding.get("evidence_gate")
 
         if gt.vulnerable and predicted_vulnerable:
             outcome = "TP"
@@ -89,6 +94,7 @@ def _score_instance(gt: GroundTruthEntry, finding: Optional[dict]) -> InstanceVe
         outcome=outcome,
         cwe_correct=cwe_correct,
         hallucination_flag=hallucination,
+        evidence_gate=gate,
     )
 
 
@@ -222,6 +228,35 @@ class EvaluationReport:
             for cwe, counts in sorted(by_cwe.items())
         ]
 
+    def evidence_gate_breakdown(self) -> dict:
+        """How flagged findings split by evidence-gate verdict, against the truth.
+
+        This is the number that says whether the gate is worth enforcing. If
+        `missing_source` findings are overwhelmingly false positives, an
+        unsubstantiated flow claim is a usable precision signal and could later
+        become a suppression rule. If they are a mix, it is only a reporting
+        field and should stay one.
+
+        Empty for runs made before the gate existed — those findings carry no
+        verdict, and inventing one for them by re-reading their explanations
+        would measure the old prompt against a rule it was never given.
+        """
+        flagged = [i for i in self.instances if i.outcome in ("TP", "FP")]
+        buckets: dict = defaultdict(lambda: {"tp": 0, "fp": 0})
+        for inst in flagged:
+            if not inst.evidence_gate:
+                continue
+            buckets[inst.evidence_gate]["tp" if inst.outcome == "TP" else "fp"] += 1
+
+        out = {}
+        for verdict, counts in sorted(buckets.items()):
+            total = counts["tp"] + counts["fp"]
+            out[verdict] = {
+                **counts,
+                "precision": round(counts["tp"] / total, 4) if total else None,
+            }
+        return out
+
     def hallucination_rate(self) -> float:
         flagged = [i for i in self.instances if i.outcome in ("TP", "FP")]
         if not flagged:
@@ -253,6 +288,7 @@ class EvaluationReport:
             "unique_vulnerability_recall": self.unique_recall(gt),
             "cwe_breakdown": self.cwe_breakdown(gt),
             "hallucination_rate_on_flagged": round(self.hallucination_rate(), 4),
+            "evidence_gate_breakdown": self.evidence_gate_breakdown(),
             "total_cost_usd": self.total_cost_usd,
             "total_tokens": self.total_tokens,
             "cost_per_tp_usd": self.cost_per_tp(),
@@ -271,6 +307,7 @@ class EvaluationReport:
                     "outcome": i.outcome,
                     "cwe_correct": i.cwe_correct,
                     "hallucination_flag": i.hallucination_flag,
+                    "evidence_gate": i.evidence_gate,
                 }
                 for i in self.instances
             ],
