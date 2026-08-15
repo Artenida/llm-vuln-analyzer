@@ -87,3 +87,14 @@ class CodeSample:
     is_async: bool = False
     ast_node: Optional[Any] = None       # populated by TreeSitterParser
     raw_content: Optional[str] = None    # full file text, needed for call graph
+    # Set when this sample is a slice of a function too long to analyse whole.
+    # A chunk is a prompt unit, not a semantic function: it gets no call-graph
+    # node, because asserting that `configureApp#2` calls everything it registers
+    # would be an edge the source does not have.
+    chunk_of: Optional[str] = None
+    chunk_index: int = 0
+    chunk_total: int = 0
+
+    @property
+    def is_chunk(self) -> bool:
+        return self.chunk_of is not None

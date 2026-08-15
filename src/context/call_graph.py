@@ -272,6 +272,14 @@ class CallGraphBuilder:
             if not s.function_name:
                 continue
 
+            # A chunk of an oversized function is a prompt unit, not a semantic
+            # function. Giving it a node would assert that `configureApp#2`
+            # calls every handler it registers — an edge the source does not
+            # have, and one that would silently change the caller counts of
+            # every handler in the graph.
+            if getattr(s, "chunk_of", None):
+                continue
+
             node_id = self._make_id(s.file_path or "", s.function_name)
 
             known.add(s.function_name)

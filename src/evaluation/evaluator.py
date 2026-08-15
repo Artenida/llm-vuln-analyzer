@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from src.evaluation.ground_truth import GroundTruthDataset, GroundTruthEntry, load_ground_truth
+from src.llm import attribution
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,101 @@ class InstanceVerdict:
     # "satisfied" | "missing_source" | "not_applicable" | None (runs predating
     # the evidence gate). See src/llm/evidence_gate.py.
     evidence_gate: Optional[str] = None
+    # Set when a finding reported against ANOTHER function named this row in its
+    # `attributed_to` / `also_implicates`. Never changes `outcome`, which stays
+    # strict; it feeds the second metric set only.
+    attributed_basis: Optional[str] = None
+    # Set on a clean row whose own false positive turned out to be the same
+    # detection that recovered a genuinely vulnerable row elsewhere.
+    attribution_neutralized: bool = False
+
+    @property
+    def match_basis(self) -> str:
+        return self.attributed_basis or "direct"
+
+    @property
+    def attributed_outcome(self) -> str:
+        """This row's outcome once cross-function attribution is credited.
+
+        Two adjustments, and only these two:
+          - a missed vulnerable row that a finding explicitly named becomes a
+            detection (FN -> TP);
+          - a false alarm that was in fact that same detection stops counting as
+            an independent one (FP -> TN).
+        The second only ever fires because the first did, so the only way to
+        erase a false positive is to have genuinely found a vulnerability that
+        was otherwise missed.
+        """
+        if self.attributed_basis and self.outcome == "FN":
+            return "TP"
+        if self.attribution_neutralized and self.outcome == "FP":
+            return "TN"
+        return self.outcome
+
+
+def _claim_by_attribution(
+    gt: GroundTruthDataset,
+    findings: list,
+    assignment: dict,
+) -> dict:
+    """Second pass: let an unmatched vulnerable row claim a finding that named it.
+
+    The prompts tell the model not to flag a function for a defect that lives in
+    its callee, and it complies — so the detection is reported against the sink
+    while the ground truth labels the caller (or the reverse). Scored naively
+    that is one false positive plus one false negative for a bug the tool found.
+    A finding that explicitly names this row in `attributed_to` or
+    `also_implicates` is the same detection, so it may be claimed here.
+
+    Constraints that keep this honest:
+      - only vulnerable rows that were MISSED are eligible, so this can never
+        displace or overwrite evidence-based matching;
+      - a finding already credited as a detection on its own row cannot be
+        claimed again, and each finding may be claimed by one row only, so one
+        finding never yields more than one detection;
+      - only findings that actually claim a vulnerability count;
+      - `attributed_to` (an explicit "the defect is here") outranks
+        `also_implicates` (a consequence), and both are recorded on the verdict.
+
+    Returns {row_index: (finding, basis)}.
+    """
+    # Findings that already earned a true positive where they were filed. Letting
+    # one of these be claimed again would count a single detection twice.
+    already_claimed = {
+        id(f) for i, f in assignment.items()
+        if f is not None
+        and f.get("vulnerability_found")
+        and gt.entries[i].vulnerable
+    }
+    claims: dict = {}
+
+    def _missed(i: int, entry) -> bool:
+        """Vulnerable, and the row's own finding did not flag it."""
+        if not entry.vulnerable:
+            return False
+        direct = assignment.get(i)
+        return direct is None or not direct.get("vulnerability_found")
+
+    for basis in ("attributed_to", "also_implicates"):
+        for i, entry in enumerate(gt.entries):
+            if i in claims or not _missed(i, entry):
+                continue
+            for finding in findings:
+                if id(finding) in already_claimed:
+                    continue
+                if not finding.get("vulnerability_found"):
+                    continue
+                raw = finding.get(basis)
+                candidates = [raw] if isinstance(raw, str) else list(raw or [])
+                if any(
+                    attribution.matches_row(c, entry.file, entry.function_name)
+                    for c in candidates
+                ):
+                    claims[i] = (finding, basis)
+                    already_claimed.add(id(finding))
+                    break
+
+    return claims
 
 
 def _score_instance(gt: GroundTruthEntry, finding: Optional[dict]) -> InstanceVerdict:
@@ -161,12 +257,89 @@ class EvaluationReport:
     # ── aggregate metrics ────────────────────────────────────────────────────
 
     def detection_metrics(self) -> ConfusionMetrics:
-        """Instance-level: was the function correctly flagged vulnerable or not, regardless of CWE."""
+        """Instance-level: was the function correctly flagged vulnerable or not, regardless of CWE.
+
+        Strict — a finding counts for a row only if it was reported against that
+        row. This stays the headline number.
+        """
         tp = sum(1 for i in self.instances if i.outcome == "TP")
         fp = sum(1 for i in self.instances if i.outcome == "FP")
         fn = sum(1 for i in self.instances if i.outcome == "FN")
         tn = sum(1 for i in self.instances if i.outcome == "TN")
         return ConfusionMetrics(tp, fp, fn, tn)
+
+    def attributed_detection_metrics(self) -> ConfusionMetrics:
+        """The same, crediting a finding that named this row from another function.
+
+        Reported ALONGSIDE the strict figure, never instead of it. A number that
+        includes indirect credit without showing how much of itself came from
+        indirect credit is not defensible, so `attribution_summary()` reports the
+        rows involved and every verdict carries its own `match_basis`.
+        """
+        outcomes = [i.attributed_outcome for i in self.instances]
+        return ConfusionMetrics(
+            outcomes.count("TP"), outcomes.count("FP"),
+            outcomes.count("FN"), outcomes.count("TN"),
+        )
+
+    def scoped_metrics(self, gt: GroundTruthDataset) -> dict:
+        """The same run scored again with each declared scope excluded.
+
+        juice-shop ships its own challenge-detection harness — `routes/verify.ts`,
+        `lib/antiCheat.ts` and friends — whose "hardcoded credentials" are the demo
+        answers it compares against. They are the challenge, not a leak, and the
+        ground truth already excludes them; five false positives land there.
+
+        Reported alongside the full figure, never instead of it. The framing that
+        survives review is "on application code precision is X; including the
+        app's own test harness, which this dataset excludes from its answer key,
+        it is Y" — with both stated and the exclusion list fixed in advance.
+        """
+        out: dict = {}
+        for scope in sorted(gt.scoring_scopes or {}):
+            files = gt.scope_files(scope)
+            if not files:
+                continue
+            kept = [
+                i for i in self.instances
+                if not any(_norm_path(i.file).endswith(f) for f in files)
+            ]
+            outcomes = [i.outcome for i in kept]
+            spec = gt.scoring_scopes[scope]
+            out[f"excluding_{scope}"] = {
+                "description": spec.get("description", ""),
+                "rows_excluded": len(self.instances) - len(kept),
+                **ConfusionMetrics(
+                    outcomes.count("TP"), outcomes.count("FP"),
+                    outcomes.count("FN"), outcomes.count("TN"),
+                ).to_dict(),
+            }
+        return out
+
+    def attribution_summary(self) -> dict:
+        """Exactly which rows the attribution-aware metric differs on, and why.
+
+        Empty on runs predating Stage 3, and on runs where the model never
+        redirected a finding — in both cases the two metric sets are identical.
+        """
+        recovered = [i for i in self.instances if i.attributed_basis and i.outcome == "FN"]
+        neutralized = [i for i in self.instances if i.attribution_neutralized and i.outcome == "FP"]
+        return {
+            "rows_recovered": [
+                {"file": i.file, "function_name": i.function_name,
+                 "gt_cwe": i.gt_cwe, "basis": i.attributed_basis}
+                for i in recovered
+            ],
+            "false_positives_neutralized": [
+                {"file": i.file, "function_name": i.function_name}
+                for i in neutralized
+            ],
+            "delta": {
+                "tp": len(recovered),
+                "fn": -len(recovered),
+                "fp": -len(neutralized),
+            },
+        }
 
     def cwe_accuracy(self) -> float:
         """Among instance-level true positives, fraction with the exact correct CWE assigned."""
@@ -284,6 +457,14 @@ class EvaluationReport:
             "source_path": self.source_path,
             "generated_at": datetime.now().isoformat(),
             "detection_metrics": self.detection_metrics().to_dict(),
+            # Strict is the headline; this is the same run scored with
+            # cross-function attribution credited, published beside it so a
+            # reader can see exactly how much came from indirect credit.
+            "detection_metrics_attribution_aware": self.attributed_detection_metrics().to_dict(),
+            "attribution_summary": self.attribution_summary(),
+            # Empty unless the dataset declares `scoring_scopes`. Never replaces
+            # the headline figure above.
+            "scoped_metrics": self.scoped_metrics(gt),
             "cwe_accuracy_on_true_positives": round(self.cwe_accuracy(), 4),
             "unique_vulnerability_recall": self.unique_recall(gt),
             "cwe_breakdown": self.cwe_breakdown(gt),
@@ -308,6 +489,8 @@ class EvaluationReport:
                     "cwe_correct": i.cwe_correct,
                     "hallucination_flag": i.hallucination_flag,
                     "evidence_gate": i.evidence_gate,
+                    "match_basis": i.match_basis,
+                    "attributed_outcome": i.attributed_outcome,
                 }
                 for i in self.instances
             ],
@@ -451,6 +634,10 @@ def evaluate_run(
     resolved = _assign_findings(gt, finding_index)
     assignment, ambiguous_rows = resolved["assignment"], resolved["ambiguous"]
 
+    # Runs from before Stage 3 carry neither field, so this is a no-op on them
+    # and the frozen baseline stays byte-identical when re-scored.
+    attribution_claims = _claim_by_attribution(gt, findings, assignment)
+
     for i, entry in enumerate(gt.entries):
         finding = assignment.get(i)
         if i in ambiguous_rows:
@@ -461,7 +648,30 @@ def evaluate_run(
                     c.get("file_path") for c in finding_index.get(entry.function_name, [])
                 ],
             })
-        instances.append(_score_instance(entry, finding))
+
+        verdict = _score_instance(entry, finding)
+
+        # The strict verdict stands as the row's own outcome; the attribution
+        # claim is recorded beside it and only affects the second metric set.
+        # Overwriting `outcome` here would make the headline number silently
+        # attribution-aware, which is the thing that would not survive review.
+        claim = attribution_claims.get(i)
+        if claim is not None:
+            verdict.attributed_basis = claim[1]
+
+        instances.append(verdict)
+
+    # Link the two halves of each recovered pair. A finding that recovered a
+    # missed vulnerable row is not also an independent false alarm on whichever
+    # clean row it was filed against — it is one detection, and was being counted
+    # as two errors. Neutralising is deliberately conditional on the recovery
+    # having happened, so "implicate a real bug to erase a false positive" only
+    # pays if the tool genuinely found a vulnerability nobody else caught.
+    claimed_findings = {id(f) for f, _ in attribution_claims.values()}
+    for i, inst in enumerate(instances):
+        direct = assignment.get(i)
+        if direct is not None and id(direct) in claimed_findings and inst.outcome == "FP":
+            inst.attribution_neutralized = True
 
     # Findings whose function name has no ground truth row at all — can't be scored
     # (either the dataset doesn't cover this function, or the LLM hallucinated the name).

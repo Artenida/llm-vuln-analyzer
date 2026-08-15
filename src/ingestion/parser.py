@@ -16,18 +16,32 @@ class FunctionNode:
     body: str
     start_line: int
     end_line: int
-    ast_node: Node
+    ast_node: Optional[Node]
+    # Set on a slice of an oversized function. `ast_node` is None on these: a
+    # chunk is a prompt unit, not a semantic function, and wiring one into the
+    # call graph as a caller of everything it registers would assert an edge the
+    # source does not have.
+    chunk_of: Optional[str] = None
+    chunk_index: int = 0
+    chunk_total: int = 0
 
 
 @dataclass
 class SkippedFunction:
-    """A function too long to analyse (over max_function_lines). Tracked so
-    coverage can be reported honestly rather than the function vanishing."""
+    """A function too long to analyse in one piece (over max_function_lines).
+
+    Tracked rather than dropped: an unreported skip silently shrinks the
+    denominator every coverage figure is computed against. `chunked` records
+    whether it was nevertheless covered as slices, so coverage can say "covered
+    as 3 chunks" instead of claiming a whole function was analysed.
+    """
     name: str
     start_line: int
     end_line: int
     line_count: int
     file_path: str = ""
+    chunked: bool = False
+    chunk_count: int = 0
 
 
 # ──────────────────────────────────────────────────────
@@ -245,14 +259,15 @@ def _walk_functions(node: Node,
         else:
             # Recorded, not discarded: an unreported skip silently shrinks the
             # denominator every recall/coverage number is computed against.
-            skipped.append(
-                SkippedFunction(
-                    name=name,
-                    start_line=start,
-                    end_line=end,
-                    line_count=line_count,
-                )
+            sk = SkippedFunction(
+                name=name,
+                start_line=start,
+                end_line=end,
+                line_count=line_count,
             )
+            # Carried so extract_functions can slice it after masking has run.
+            sk._node = node  # type: ignore[attr-defined]
+            skipped.append(sk)
 
         # Named methods are sometimes assigned inside another named
         # function's body instead of declared at the top level — e.g. the
@@ -309,6 +324,27 @@ def _contains(outer: Node, inner: Node) -> bool:
     return outer.start_byte <= inner.start_byte and inner.end_byte <= outer.end_byte
 
 
+def _mask_range(start_byte: int, end_byte: int, nested: list, source_bytes: bytes) -> str:
+    """Source text for a byte range, with separately-extracted nested functions
+    replaced by a marker. Same treatment `_build_masked_body` gives a whole
+    function, applied to an arbitrary span so chunks get it too."""
+    nested_sorted = sorted(nested, key=lambda f: f.ast_node.start_byte)
+    chunks = []
+    cursor = start_byte
+    for f in nested_sorted:
+        n = f.ast_node
+        if n.start_byte < cursor or n.end_byte > end_byte:
+            continue
+        chunks.append(source_bytes[cursor:n.start_byte])
+        line_count = n.end_point[0] - n.start_point[0] + 1
+        marker = f"/* --- nested method '{f.name}' analyzed separately --- */"
+        placeholder = "\n".join([marker] + [""] * (line_count - 1))
+        chunks.append(placeholder.encode("utf-8"))
+        cursor = n.end_byte
+    chunks.append(source_bytes[cursor:end_byte])
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 def _build_masked_body(node: Node, nested: list, source_bytes: bytes) -> str:
     nested_sorted = sorted(nested, key=lambda f: f.ast_node.start_byte)
     chunks = []
@@ -341,13 +377,95 @@ def _mask_nested_bodies(results: list, source_bytes: bytes) -> None:
 
 
 # ──────────────────────────────────────────────────────
+# Chunking of oversized functions
+# ──────────────────────────────────────────────────────
+#
+# juice-shop's `server.ts::configureApp` is 514 lines, over max_function_lines,
+# and so was the one function the extractor dropped. It holds the app's entire
+# route wiring, including project-marked vuln-lines for five documented
+# challenges - all of which sat outside every metric.
+#
+# Slicing it at top-level statement boundaries keeps each piece analysable while
+# leaving line numbers byte-exact, which matters because run_saver clamps
+# affected_lines to a sample's own range. The part-of-N context is therefore
+# carried as metadata and rendered into the prompt separately, NOT injected into
+# the code as a header comment: prepending even one line would shift every line
+# number in the chunk.
+
+
+def _chunk_function(
+    node: Node,
+    name: str,
+    already_extracted: list,
+    source_bytes: bytes,
+    max_lines: int,
+) -> list:
+    """Slice an oversized function into analysable FunctionNodes.
+
+    Splits between top-level statements of the function body, never inside one,
+    so a chunk is always a run of whole statements. A single statement longer
+    than max_lines becomes an oversized chunk of its own rather than being cut
+    apart or dropped - one over-long prompt is better than a blind spot.
+    """
+    body = node.child_by_field_name("body")
+    if body is None:
+        return []
+
+    statements = [c for c in body.children if c.is_named]
+    if len(statements) < 2:
+        # Nothing to split on: one enormous statement, or an unrecognised body
+        # shape. Leave it skipped rather than emit a chunk identical to the
+        # function we already declined to analyse.
+        return []
+
+    groups: list = []
+    current: list = []
+    for stmt in statements:
+        if current:
+            span = stmt.end_point[0] - current[0].start_point[0] + 1
+            if span > max_lines:
+                groups.append(current)
+                current = []
+        current.append(stmt)
+    if current:
+        groups.append(current)
+
+    total = len(groups)
+    out = []
+    for index, group in enumerate(groups, 1):
+        start_byte, end_byte = group[0].start_byte, group[-1].end_byte
+        nested = [
+            f for f in already_extracted
+            if f.ast_node is not None
+            and start_byte <= f.ast_node.start_byte
+            and f.ast_node.end_byte <= end_byte
+        ]
+        out.append(
+            FunctionNode(
+                name=f"{name}#{index}",
+                body=_mask_range(start_byte, end_byte, nested, source_bytes),
+                start_line=group[0].start_point[0] + 1,
+                end_line=group[-1].end_point[0] + 1,
+                ast_node=None,
+                chunk_of=name,
+                chunk_index=index,
+                chunk_total=total,
+            )
+        )
+    return out
+
+
+# ──────────────────────────────────────────────────────
 # Public parser
 # ──────────────────────────────────────────────────────
 
 class TreeSitterParser:
 
-    def __init__(self, max_function_lines: int = 200):
+    def __init__(self, max_function_lines: int = 200, chunk_oversized: bool = True):
         self.max_function_lines = max_function_lines
+        # When False, an oversized function is dropped as before. Kept as a
+        # switch so the two behaviours stay directly comparable.
+        self.chunk_oversized = chunk_oversized
         # Functions dropped by the most recent extract_functions() call
         self.last_skipped: list[SkippedFunction] = []
 
@@ -407,6 +525,26 @@ class TreeSitterParser:
         )
 
         _mask_nested_bodies(results, source_bytes)
+
+        # After masking, so chunks are cut from already-extracted context and a
+        # nested function is not analysed twice — once under its own name and
+        # again inside whichever chunk contains it.
+        if self.chunk_oversized:
+            for sk in self.last_skipped:
+                node = getattr(sk, "_node", None)
+                if node is None:
+                    continue
+                chunks = _chunk_function(
+                    node, sk.name, results, source_bytes, self.max_function_lines
+                )
+                if chunks:
+                    results.extend(chunks)
+                    sk.chunked = True
+                    sk.chunk_count = len(chunks)
+
+        for sk in self.last_skipped:
+            if hasattr(sk, "_node"):
+                delattr(sk, "_node")
 
         return results
 

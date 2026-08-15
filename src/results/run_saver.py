@@ -169,6 +169,11 @@ def save_run(
             # a flow-dependent CWE without naming where the untrusted data enters.
             "evidence_gate":       gate_verdict,
             "declared_source":     evidence_gate.declared_source(report.explanation),
+            # Where the defect actually lives, when the model redirected it, and
+            # what is unsafe as a consequence. Scored both with and without this
+            # credit — see EvaluationReport.to_dict.
+            "attributed_to":       report.attributed_to,
+            "also_implicates":     list(report.also_implicates or []),
             "analysis_mode":       report.analysis_mode,
             "error":               report.error,
             "duplicate_group":     group_id if is_dup else None,
@@ -213,10 +218,29 @@ def save_extraction_results(
             "end_line":      sample.end_line,
             "language":      sample.language.value,
             "code":          sample.code,
+            **(
+                {
+                    "chunk_of": sample.chunk_of,
+                    "chunk_index": sample.chunk_index,
+                    "chunk_total": sample.chunk_total,
+                }
+                if getattr(sample, "chunk_of", None) else {}
+            ),
         })
 
     skipped = skipped or []
-    total_seen = len(samples) + len(skipped)
+
+    # Chunks are slices of a function that was too long to analyse whole, so
+    # counting them as functions would inflate both the numerator and the
+    # denominator and quietly overstate coverage. A function covered as chunks
+    # is counted once, as one covered function.
+    whole = [s for s in samples if not getattr(s, "chunk_of", None)]
+    chunk_samples = [s for s in samples if getattr(s, "chunk_of", None)]
+    chunked = [sk for sk in skipped if getattr(sk, "chunked", False)]
+    uncovered = [sk for sk in skipped if not getattr(sk, "chunked", False)]
+
+    total_seen = len(whole) + len(skipped)
+    covered = len(whole) + len(chunked)
 
     payload = {
         "metadata": {
@@ -224,9 +248,12 @@ def save_extraction_results(
             "generated_at": datetime.now().isoformat(),
         },
         "summary": {
-            "functions_found": len(samples),
+            "functions_found": len(whole),
             "functions_skipped_oversized": len(skipped),
-            "coverage": round(len(samples) / total_seen, 4) if total_seen else 1.0,
+            "functions_covered_as_chunks": len(chunked),
+            "chunks_produced": len(chunk_samples),
+            "functions_not_covered": len(uncovered),
+            "coverage": round(covered / total_seen, 4) if total_seen else 1.0,
         },
         "results": results,
         "skipped_oversized": [
@@ -236,6 +263,8 @@ def save_extraction_results(
                 "start_line":    sk.start_line,
                 "end_line":      sk.end_line,
                 "line_count":    sk.line_count,
+                "chunked":       getattr(sk, "chunked", False),
+                "chunk_count":   getattr(sk, "chunk_count", 0),
             }
             for sk in skipped
         ],

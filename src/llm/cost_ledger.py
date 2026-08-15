@@ -147,13 +147,21 @@ class CostLedger:
     def by_run(self, limit: int = 20) -> list[CostSummaryRow]:
         """Most-recently-active run first. Ordered by each run's latest event
         timestamp, not by run_id — run_id embeds the model name before the
-        timestamp, so sorting by it groups by model rather than by time."""
+        timestamp, so sorting by it groups by model rather than by time.
+
+        `MAX(rowid)` breaks ties. Timestamps have sub-second text precision but
+        events recorded in the same instant still collide, and on a collision
+        SQLite is free to return either row first — which made `--limit` drop an
+        arbitrary run rather than the oldest. rowid is monotonic per insert, so
+        it settles ties by actual write order.
+        """
         sql = (
             "SELECT run_id, COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), "
             "SUM(total_tokens), SUM(cost_usd), "
-            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), MAX(timestamp) AS last_seen "
+            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), "
+            "MAX(timestamp) AS last_seen, MAX(rowid) AS last_row "
             "FROM cost_events WHERE run_id IS NOT NULL "
-            "GROUP BY run_id ORDER BY last_seen DESC"
+            "GROUP BY run_id ORDER BY last_seen DESC, last_row DESC"
         )
         if limit:
             sql += f" LIMIT {int(limit)}"

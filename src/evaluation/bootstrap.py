@@ -106,6 +106,15 @@ def build_ground_truth(
     functions = []
     flagged = 0
 
+    # Chunks of an oversized function get NO row. A skeleton row defaults to
+    # clean, so auto-generating rows here would turn every finding inside a
+    # chunk into a false positive against a label nobody ever read — the exact
+    # failure the 2026-08-11 verification pass was needed to undo. Chunked
+    # functions are recorded under `coverage` instead, as analysed but awaiting
+    # curation.
+    chunk_samples = [s for s in samples if getattr(s, "chunk_of", None)]
+    samples = [s for s in samples if not getattr(s, "chunk_of", None)]
+
     for s in samples:
         rel = _rel_path(s.file_path, repo_root)
         is_touched = rel in touched and _overlaps(s.start_line, s.end_line, touched[rel])
@@ -142,6 +151,7 @@ def build_ground_truth(
     functions.sort(key=lambda e: (e["file"], e["function_name"]))
 
     total_seen = len(samples) + len(skipped)
+    chunked = [sk for sk in skipped if getattr(sk, "chunked", False)]
     return {
         "schema_version": "1.0",
         "dataset": dataset,
@@ -163,16 +173,25 @@ def build_ground_truth(
         "coverage": {
             "functions_extracted": len(samples),
             "functions_skipped_oversized": len(skipped),
+            "functions_covered_as_chunks": len(chunked),
+            "chunks_produced": len(chunk_samples),
             "coverage": round(len(samples) / total_seen, 4) if total_seen else 1.0,
             "note": (
-                "Skipped functions have no ground truth row and are outside every "
-                "metric. Report this coverage alongside any recall figure."
+                "`coverage` counts only functions with a ground-truth row, so a "
+                "function analysed as chunks does NOT raise it: chunks are "
+                "analysed but deliberately have no rows, since an auto-generated "
+                "row defaults to clean and would turn any finding inside one into "
+                "a false positive against a label nobody read. Curate rows for "
+                "them by hand before quoting a metric that includes them. "
+                "Report this coverage alongside any recall figure."
             ),
             "skipped_oversized": [
                 {
                     "function_name": sk.name,
                     "file": _rel_path(sk.file_path, repo_root),
                     "line_count": sk.line_count,
+                    "chunked": getattr(sk, "chunked", False),
+                    "chunk_count": getattr(sk, "chunk_count", 0),
                 }
                 for sk in skipped
             ],

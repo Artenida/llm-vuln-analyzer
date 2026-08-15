@@ -93,6 +93,7 @@ class TestReActPrompt:
             end_line=9,
             language="typescript",
             code="function getAddress () {}",
+            chunk_note="",
             route_context=format_route_block(GUARDED, "getAddress"),
             tool_history="(none yet)",
         )

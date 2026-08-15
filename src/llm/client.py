@@ -15,10 +15,16 @@ from typing import Any, Optional
 import openai
 
 from src.config import LLMConfig
-from src.context.route_context import format_route_block
+from src.context.route_context import format_chunk_note, format_route_block
+from src.llm.attribution import ATTRIBUTION_PROMPT, clean_implicated, normalize_node_id
 from src.llm.cost_ledger import CostLedger
 from src.llm.evidence_gate import EVIDENCE_GATE_PROMPT
 from src.llm.pricing import TokenUsage, estimate_cost, extract_usage
+from src.llm.taxonomy import (
+    CWE_TAXONOMY_PROMPT,
+    FEATURE_FLAG_RULE,
+    SEVERITY_RULES_PROMPT,
+)
 from src.models import CodeSample
 
 logger = logging.getLogger(__name__)
@@ -41,6 +47,14 @@ class VulnerabilityReport:
     patch_suggestion: str
     confidence: float
     hallucination_flag: bool
+    # Where the defective code actually lives, when that is not the analysed
+    # function ("<file>::<function>"), and the functions that are unsafe as a
+    # consequence. The anti-bleed rules make the model disclaim a defect it can
+    # see in a callee; without somewhere to put that observation, the same bug
+    # is scored twice against the tool — once as a false positive at the sink,
+    # once as a false negative at the caller.
+    attributed_to: Optional[str] = None
+    also_implicates: list[str] = field(default_factory=list)
     analysis_mode: str = "call_graph_context"
     error: Optional[str] = None
     unified_diff: str = ""
@@ -109,7 +123,10 @@ Option B — emit the final vulnerability report when you have enough informatio
                MUST be > 0.5 when vulnerability_found is true.
                MUST be < 0.5 when vulnerability_found is false.
                0.9+ means near-certain exploit; 0.1 means near-certain clean.,
-  "hallucination_flag": boolean
+  "hallucination_flag": boolean,
+  "attributed_to": "<file>::<function>" of the function whose code is defective,
+                   or null when that is the target itself,
+  "also_implicates": [at most 3 node_ids that are unsafe as a consequence]
 }
 
 Available tools:
@@ -143,6 +160,7 @@ Rules:
 - "No route registration was found" means unknown, NOT unguarded. If you cannot
   establish how a function is reached, say so in the explanation and lower your
   confidence rather than assuming the worst case.
+""" + FEATURE_FLAG_RULE + """\
 - Emit "final" as soon as you have enough evidence. Max steps is enforced externally.
 - Respond ONLY with valid JSON matching Option A or Option B. No markdown.
 
@@ -161,50 +179,10 @@ Rules:
     any finding you make there to `X`, not to the function containing the
     comment.
 
-CWE assignment rules — use the MOST SPECIFIC applicable CWE:
-  CWE-89    SQL/NoSQL built by string concat or template literal interpolation
-  CWE-347   JWT or token accepted without signature verification (jwt.decode vs jwt.verify)
-  CWE-798   Hardcoded credentials, secrets, API keys, or static bypass codes
-  CWE-20    Security decision based on a client-supplied header (e.g. X-Forwarded-For for IP)
-  CWE-306   Security step skipped (e.g. current-password not verified before change)
-  CWE-208   Non-constant-time comparison of secrets (timing attack)
-  CWE-269   Role or privilege accepted directly from user-controlled input
-  CWE-639   Object/resource fetched or mutated by a client-supplied id with no check that
-            it belongs to the requesting user (IDOR / broken object-level authorization)
-  CWE-862   A privileged or sensitive action (refund, delete, role change, admin-only op)
-            performed with no check of the caller's role/permission at all
-  CWE-841   A multi-step business workflow's required ordering is not enforced
-            (e.g. shipping/fulfilling before payment is confirmed)
-  CWE-915   Client-supplied fields merged wholesale into a stored record instead of only
-            the fields that are meant to be user-editable (mass assignment)
-  CWE-362   A business-state flag is read ("check"), then some work happens, then the
-            flag is written ("act") — a concurrent request can pass the check before
-            either write lands (e.g. a coupon/voucher redeemed twice)
-  CWE-79    User-controlled input rendered into an HTML response in the wrong context
-            (e.g. HTML-encoded but placed inside a <script> or URL/attribute context) — XSS
-  CWE-95    User-controlled input passed to eval(), new Function(), vm.runInContext, or
-            similar dynamic code execution (eval/code injection)
-  CWE-1333  A regular expression with nested or overlapping quantifiers (e.g. `(a+)+`,
-            `([0-9]+)+`) applied to user-controlled input — catastrophic backtracking (ReDoS)
-  CWE-117   User-controlled input written to a log sink (console.log, a logger call) without
-            sanitizing newlines/control characters first — log injection / CRLF forging
-  CWE-521   A password/credential policy (regex or length/complexity check) that imposes
-            insufficient requirements (e.g. any length, no character-class requirement)
-  CWE-256   A password or credential stored or compared in plaintext instead of a salted
-            hash, or logged/returned in plaintext
-  NOTE: CWE-290 is for relay/reflection spoofing attacks — do NOT use it for static bypass codes
-        or hardcoded admin secrets; use CWE-798 instead.
-
+""" + CWE_TAXONOMY_PROMPT + """
 """ + EVIDENCE_GATE_PROMPT + """
-Severity rules — apply consistently for the same CWE:
-  high     CWE-89, CWE-347, CWE-798, CWE-639, CWE-862, CWE-95, CWE-256
-  medium   CWE-20, CWE-208, CWE-269, CWE-306, CWE-841, CWE-915, CWE-362, CWE-79,
-           CWE-1333, CWE-117, CWE-521
-  low      Informational / defence-in-depth only
-  Deviate from these defaults ONLY when you can state a concrete amplifying or
-  mitigating factor (e.g. "no authentication required to reach this endpoint",
-  or "this stores the credential itself, not just a one-time comparison of it").
-
+""" + ATTRIBUTION_PROMPT + """
+""" + SEVERITY_RULES_PROMPT + """
 Business logic checklist — CWE-639/862/841/915/362 are NOT syntax patterns;
 they only show up by checking what the function does against what it SHOULD
 enforce. Use get_callers/get_source/get_node_info/get_taint_path (same tools
@@ -250,7 +228,7 @@ Lines: {start_line}–{end_line}
 ```{language}
 {code}
 ```
-
+{chunk_note}
 {route_context}
 
 === TOOL HISTORY ===
@@ -366,6 +344,7 @@ class LLMClient:
             end_line=end_line or sample.end_line or "?",
             language=sample.language.value,
             code=sample.code,
+            chunk_note=format_chunk_note(sample),
             route_context=format_route_block(route_context or [], sample.function_name),
             tool_history=history_text or "(none yet)",
         )
@@ -415,6 +394,7 @@ class LLMClient:
             patch_suggestion=data.get("patch_suggestion", ""),
             confidence=float(data.get("confidence", 0.0)),
             hallucination_flag=bool(data.get("hallucination_flag", False)),
+            **_parse_attribution(data, sample),
         )
 
     def _parse_react_step(self, raw: str, sample: CodeSample) -> ReActStep:
@@ -449,6 +429,7 @@ class LLMClient:
             confidence=float(data.get("confidence", 0.0)),
             hallucination_flag=bool(data.get("hallucination_flag", False)),
             analysis_mode="react_loop",
+            **_parse_attribution(data, sample),
         )
         return ReActStep(
             is_final=True,
@@ -460,6 +441,27 @@ class LLMClient:
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_attribution(data: dict, sample: CodeSample) -> dict:
+    """Pull attributed_to / also_implicates out of a model response.
+
+    Normalised and capped here rather than at scoring time, so a malformed or
+    over-long claim never reaches the saved run in the first place — the cap is
+    what stops "implicate everything" being a winning strategy.
+    """
+    target = f"{sample.file_path}::{sample.function_name}"
+    attributed_to = normalize_node_id(data.get("attributed_to"))
+    # Naming the target as the home of the defect is the default case, not an
+    # attribution — storing it would make every finding look redirected.
+    if attributed_to and attributed_to.endswith(f"::{sample.function_name}"):
+        attributed_to = None
+    return {
+        "attributed_to": attributed_to,
+        "also_implicates": clean_implicated(
+            data.get("also_implicates"), attributed_to=attributed_to, target=target
+        ),
+    }
+
 
 def _build_minimal_prompt(sample: CodeSample) -> str:
     """Self-contained single-function analysis prompt, used when no call-graph

@@ -72,6 +72,7 @@ try:
 except ImportError:
     pass  # dotenv optional — fall back to manually set env vars
 import logging
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -87,11 +88,15 @@ from src.results.patch_validator import PatchValidator
 from src.results.export_graph import export_dot, export_html, select_subgraph
 from src.results.save_graph import load_call_graph
 from src.context.call_graph import nodes_to_dict
-from src.context.route_context import format_route_block
+from src.context.route_context import format_chunk_note, format_route_block
+from src.llm.attribution import ATTRIBUTION_PROMPT
 from src.llm.client import LLMClient
 from src.llm.cost_ledger import CostLedger
 from src.llm.evidence_gate import EVIDENCE_GATE_PROMPT
+from src.llm.taxonomy import CWE_TAXONOMY_PROMPT, FEATURE_FLAG_RULE, SEVERITY_RULES_PROMPT
 from src.llm.pricing import TokenUsage, estimate_cost
+from src.agent.flow_groups import build_flow_groups
+from src.agent.flow_pass import run_flow_pass
 from src.agent.react_loop import ReActAgent, MAX_STEPS
 from src.agent.tools import ToolSet
 from src.models import CodeSample
@@ -178,6 +183,18 @@ def analyze(
              "analysis.json, checkpoint.jsonl, graph HTML/DOT) into this directory. "
              "Takes precedence over --run-name/--dataset."
     ),
+    flow_pass: bool = typer.Option(
+        False, "--flow-pass",
+        help="After the per-function pass, run a second pass over GROUPS of related "
+             "functions (producer/consumer pairs, route clusters, model writers) "
+             "looking for defects that only exist between functions — a value one "
+             "mints and another trusts, a check each assumes the other performs. "
+             "Costs roughly $1-2 more per run."
+    ),
+    flow_max_groups: Optional[int] = typer.Option(
+        None, "--flow-max-groups",
+        help="Cap how many workflow groups the flow pass analyses. Omit for all."
+    ),
     api_key_alias: Optional[str] = typer.Option(
         None, "--api-key-alias",
         help="Which API key to use, for setups with more than one key for the same "
@@ -220,6 +237,7 @@ def analyze(
     extractor = CodeExtractor(
         max_function_lines=config.ingestion.max_function_lines,
         skip_dirs=config.ingestion.skip_dirs,
+        chunk_oversized=config.ingestion.chunk_oversized,
     )
 
     # ── extraction ────────────────────────────────────────────────────────────
@@ -245,18 +263,29 @@ def analyze(
     skipped = extractor.skipped_functions
 
     typer.echo("\nExtraction summary")
-    typer.echo(f"  Functions : {len(samples)}")
+    whole = [s for s in samples if not s.chunk_of]
+    chunk_samples = [s for s in samples if s.chunk_of]
+    typer.echo(f"  Functions : {len(whole)}")
     for lang, count in sorted(lang_counts.items()):
         typer.echo(f"  {lang:<12}: {count}")
-    if skipped:
-        covered = len(samples) / (len(samples) + len(skipped))
+    if chunk_samples:
         typer.echo(
-            f"  Skipped   : {len(skipped)} function(s) over "
-            f"{config.ingestion.max_function_lines} lines — NOT analysed "
+            f"  Chunks    : {len(chunk_samples)} slice(s) of oversized function(s), "
+            "analysed separately"
+        )
+    if skipped:
+        chunked = [sk for sk in skipped if sk.chunked]
+        uncovered = [sk for sk in skipped if not sk.chunked]
+        covered = (len(whole) + len(chunked)) / (len(whole) + len(skipped))
+        typer.echo(
+            f"  Oversized : {len(skipped)} function(s) over "
+            f"{config.ingestion.max_function_lines} lines — "
+            f"{len(chunked)} analysed as chunks, {len(uncovered)} NOT analysed "
             f"({covered:.1%} coverage)"
         )
         for sk in skipped[:5]:
-            typer.echo(f"    {sk.name} ({sk.line_count} lines) {sk.file_path}")
+            how = f"→ {sk.chunk_count} chunks" if sk.chunked else "→ not analysed"
+            typer.echo(f"    {sk.name} ({sk.line_count} lines) {how}  {sk.file_path}")
         if len(skipped) > 5:
             typer.echo(f"    ... and {len(skipped) - 5} more (see extraction JSON)")
 
@@ -475,6 +504,40 @@ def analyze(
     # fills in the gaps out of order.
     reports = [completed[k] for k in sorted(completed)]
 
+    # ── flow pass ─────────────────────────────────────────────────────────────
+    # A second pass over GROUPS of functions. The per-function pass cannot see a
+    # defect whose two halves are individually defensible — juice-shop's
+    # generateCoupon/discountFromCoupon pair was examined function by function
+    # and both were correctly called clean.
+    flow_meta = None
+    if flow_pass and not stopped_early:
+        groups = build_flow_groups(samples, graph, max_groups=flow_max_groups)
+        if not groups:
+            typer.echo("\nFlow pass: no workflow groups found — skipping.")
+        else:
+            typer.echo(f"\nFlow pass: {len(groups)} workflow group(s)\n")
+
+            def _progress(i, total, group):
+                typer.echo(f"  [{i:>2}/{total}] {group.kind:<18} {group.label[:52]}")
+
+            flow_reports = run_flow_pass(client, groups, samples, progress=_progress)
+            flow_usage = TokenUsage()
+            for r in flow_reports:
+                flow_usage = flow_usage + (r.token_usage or TokenUsage())
+            flow_cost = estimate_cost(config.llm.model, flow_usage)
+
+            typer.echo(
+                f"\n  {len(flow_reports)} cross-function finding(s)"
+                + (f", ${flow_cost:.4f}" if flow_cost is not None else "")
+            )
+            reports = reports + flow_reports
+            flow_meta = {
+                "flow_pass_groups": len(groups),
+                "flow_pass_findings": len(flow_reports),
+                "flow_pass_cost_usd": round(flow_cost, 6) if flow_cost is not None else None,
+                "flow_pass_group_kinds": dict(Counter(g.kind for g in groups)),
+            }
+
     # ── save results ──────────────────────────────────────────────────────────
     edge_meta = None
     if edge_usage and edge_usage.total_tokens:
@@ -493,6 +556,10 @@ def analyze(
         edge_meta["partial_reason"] = stopped_early
         edge_meta["functions_analysed"] = len(reports)
         edge_meta["functions_total"] = len(samples)
+
+    if flow_meta:
+        edge_meta = dict(edge_meta or {})
+        edge_meta.update(flow_meta)
 
     out_path = save_run(
         reports=reports,
@@ -622,12 +689,18 @@ def _build_context_prompt(
         "    including anything it overwrites on the request object. A check performed by a\n"
         "    guard is not missing from the target. 'No route registration found' means\n"
         "    unknown, NOT unguarded.\n"
+        + FEATURE_FLAG_RULE
     )
     lines.append("=" * 60)
     lines.append(f"TARGET FUNCTION: {sample.function_name}")
     lines.append(f"File: {sample.file_path}  Lines: {sample.start_line}–{sample.end_line}")
     lines.append("=" * 60)
     lines.append(f"```{lang}\n{sample.code}\n```\n")
+
+    chunk_note = format_chunk_note(sample)
+    if chunk_note:
+        lines.append(chunk_note)
+        lines.append("")
 
     # Same block the ReAct path renders, so the two modes see identical context
     # and a difference between them still means something about the modes.
@@ -663,21 +736,14 @@ def _build_context_prompt(
         ))
 
     lines.append(
-        "\nCWE assignment rules — use the MOST SPECIFIC applicable CWE:\n"
-        "  CWE-89   SQL/NoSQL built by string concat or template literal interpolation\n"
-        "  CWE-347  JWT or token accepted without signature verification\n"
-        "  CWE-798  Hardcoded credentials, secrets, API keys, or static bypass codes\n"
-        "  CWE-20   Security decision based on a client-supplied header (e.g. X-Forwarded-For)\n"
-        "  CWE-306  Security step skipped (e.g. current-password not verified before change)\n"
-        "  CWE-208  Non-constant-time comparison of secrets (timing attack)\n"
-        "  CWE-269  Role or privilege accepted directly from user-controlled input\n"
-        "  NOTE: CWE-290 is for relay/reflection attacks — NOT for static bypass codes; use CWE-798.\n"
+        # Shared with the ReAct prompt rather than restated. These two lists had
+        # already drifted apart — the ReAct prompt named 18 CWEs and this one 7 —
+        # so the modes were being compared as though they differed only in tool
+        # access, when one of them could not name most of the classes.
+        "\n" + CWE_TAXONOMY_PROMPT +
         "\n" + EVIDENCE_GATE_PROMPT +
-        "\nSeverity rules — consistent for the same CWE:\n"
-        "  high   → CWE-89, CWE-347, CWE-798\n"
-        "  medium → CWE-20, CWE-208, CWE-269, CWE-306\n"
-        "  low    → informational / defence-in-depth only\n"
-        "  Deviate only when you can state a concrete amplifying or mitigating factor.\n"
+        "\n" + ATTRIBUTION_PROMPT +
+        "\n" + SEVERITY_RULES_PROMPT +
         "\nRespond with this EXACT JSON — no markdown, no extra text:\n"
         "{\n"
         '  "vulnerability_found": boolean,\n'
@@ -689,7 +755,10 @@ def _build_context_prompt(
         '  "confidence": float 0.0–1.0 — probability that a vulnerability EXISTS.\n'
         '               MUST be > 0.5 when vulnerability_found is true.\n'
         '               MUST be < 0.5 when vulnerability_found is false.,\n'
-        '  "hallucination_flag": boolean\n'
+        '  "hallucination_flag": boolean,\n'
+        '  "attributed_to": "<file>::<function>" where the defective code lives,\n'
+        '                   or null when that is the target itself,\n'
+        '  "also_implicates": [at most 3 node_ids unsafe as a consequence]\n'
         "}"
     )
     return "\n".join(lines)
@@ -834,6 +903,7 @@ def graph(
         extractor = CodeExtractor(
             max_function_lines=config.ingestion.max_function_lines,
             skip_dirs=config.ingestion.skip_dirs,
+            chunk_oversized=config.ingestion.chunk_oversized,
         )
         typer.echo(f"\nIngesting {path} ...")
         samples = extractor.from_path(path)
@@ -1001,6 +1071,7 @@ def patch(
     extractor = CodeExtractor(
         max_function_lines=config.ingestion.max_function_lines,
         skip_dirs=config.ingestion.skip_dirs,
+        chunk_oversized=config.ingestion.chunk_oversized,
     )
     samples = extractor.from_path(source_path)
     sample_index = {(s.function_name, s.file_path): s for s in samples}
@@ -1214,6 +1285,40 @@ def evaluate(
         typer.echo(f"  F1        : {m.f1:.3f}")
         typer.echo(f"  CWE accuracy (on TPs) : {report.cwe_accuracy():.3f}")
         typer.echo(f"  Hallucination rate (on flagged) : {report.hallucination_rate():.3f}")
+        # Printed right under the headline so the two are always read together —
+        # an attribution-aware number quoted on its own is not defensible.
+        am = report.attributed_detection_metrics()
+        asum = report.attribution_summary()
+        if (am.tp, am.fp, am.fn) != (m.tp, m.fp, m.fn):
+            typer.echo(
+                f"\nWith cross-function attribution credited "
+                f"(TP={am.tp} FP={am.fp} FN={am.fn}):"
+            )
+            typer.echo(f"  Precision : {am.precision:.3f}")
+            typer.echo(f"  Recall    : {am.recall:.3f}")
+            typer.echo(f"  F1        : {am.f1:.3f}")
+            typer.echo(
+                f"  from {len(asum['rows_recovered'])} row(s) recovered, "
+                f"{len(asum['false_positives_neutralized'])} false positive(s) neutralized"
+            )
+
+        gate = report.evidence_gate_breakdown()
+        if gate:
+            typer.echo("\nEvidence gate on flow CWEs (TP / FP / precision):")
+            for verdict, row in gate.items():
+                prec = f"{row['precision']:.3f}" if row["precision"] is not None else "n/a"
+                typer.echo(f"  {verdict:<16} {row['tp']:>3} / {row['fp']:>3} / {prec}")
+
+        scoped = report.scoped_metrics(gt)
+        for label, row in scoped.items():
+            typer.echo(
+                f"\n{label.replace('_', ' ')} ({row['rows_excluded']} rows excluded, "
+                f"TP={row['tp']} FP={row['fp']} FN={row['fn']}):"
+            )
+            typer.echo(f"  Precision : {row['precision']:.3f}")
+            typer.echo(f"  Recall    : {row['recall']:.3f}")
+            typer.echo(f"  F1        : {row['f1']:.3f}")
+
         typer.echo(f"\nDeduplicated vulnerability recall: {ur['detected']}/{ur['planted']} ({ur['recall']:.3f})")
 
         if report.total_cost_usd is not None:
@@ -1304,6 +1409,7 @@ def bootstrap_ground_truth(
     extractor = CodeExtractor(
         max_function_lines=config.ingestion.max_function_lines,
         skip_dirs=config.ingestion.skip_dirs,
+        chunk_oversized=config.ingestion.chunk_oversized,
     )
 
     typer.echo(f"\nExtracting functions from {repo} ...")

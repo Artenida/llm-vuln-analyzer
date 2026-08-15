@@ -2,39 +2,65 @@
 
 ## Status
 
-| Stage | State |
-|---|---|
-| 0 · Measurement harness + dataset hygiene | **applied** 2026-08-15 |
-| 1 · Route & middleware context | **applied** 2026-08-15, code only — not yet re-measured |
-| 2 · Evidence gate for flow CWEs | **applied** 2026-08-15, code only — not yet re-measured |
-| 3–7 | not started |
+**All seven stages are implemented as of 2026-08-15. None has been re-measured —
+no paid run has been made, so every number below is still the baseline.**
 
-Stage 1 is implemented and verified against a `--dry-run` extraction of
-juice-shop (111 functions now carry route registrations, 28 of them with a
-folded prefix guard). **The paid re-run that would confirm the −12 FP has not
-been made**, so every number in this document is still the baseline. Run:
+| Stage | State | Verified without spending |
+|---|---|---|
+| 0 · Measurement harness + dataset hygiene | applied | baseline re-scores byte-identical |
+| 1 · Route & middleware context | applied | 111 functions carry registrations, 28 with a folded prefix guard |
+| 2 · Evidence gate for flow CWEs | applied | gate reaches 28 of 77 flagged findings |
+| 3 · Attribution credit | applied | dual metrics, no-op on the baseline |
+| 4 · Taxonomy expansion + rule rewrites | applied | both prompts now share one 23-CWE list |
+| 5 · Scope exclusions | applied | excluding harness: FP 37→31, P 0.519→0.563 |
+| 6 · Oversized-function chunking | applied | `configureApp` → 3 chunks, coverage 0.997→1.000 |
+| 7 · Flow-level second pass | applied | 76 groups; the coupon triple is one of them |
+
+To measure (~$3–5 with a warm edge cache):
 
 ```bash
 python -m src.cli analyze -p ../app-test/juice-shop -c experiments/configs/juice_shop.yaml \
-  --react --run-name stage1 --dataset juice-shop --budget-usd 5
-python -m src.cli evaluate -r experiments/datasets/juice-shop/runs/stage1/analysis.json \
+  --react --flow-pass --run-name stage1-7 --dataset juice-shop --budget-usd 6
+python -m src.cli evaluate -r experiments/datasets/juice-shop/runs/stage1-7/analysis.json \
   -g experiments/datasets/juice-shop/ground_truth.json
 python experiments/scripts/diff_evals.py \
   experiments/datasets/juice-shop/runs/baseline-frozen/evaluation.json \
   experiments/datasets/juice-shop/evaluations/<new eval>.json
 ```
 
-Two things were found while implementing and differ from what is written below:
+The stages are independent, so one run scores all seven and `diff_evals.py`
+attributes it row by row. Isolating a single stage means re-running with that
+change alone.
+
+### Deviations from the plan as written
 
 1. **`save_call_graph` duplicated `nodes_to_dict` by hand**, so `route_registrations`
    reached the in-memory graph and the HTML export but was silently dropped from
-   the saved `call_graph.json`. Fixed by delegating rather than patching, so the
-   two serializers cannot drift again. Worth knowing that this class of bug was
-   already latent for every other node field.
+   the saved `call_graph.json`. Fixed by delegating rather than patching. This
+   class of bug was already latent for every other node field.
 2. **The summary derivations moved to `src/evaluation/ground_truth.py`** rather
-   than living in `experiments/scripts/`. `experiments/` is gitignored, so a test
-   importing from there passes locally and fails on a fresh clone. The script is
-   now a thin CLI over the tracked functions.
+   than `experiments/scripts/`. `experiments/` is gitignored, so a test importing
+   from there passes locally and fails on a fresh clone.
+3. **Stage 2 does not set `hallucination_flag`** — see that stage's section. A
+   dedicated `evidence_gate` field instead, so a reported metric does not change
+   meaning underneath the baseline.
+4. **Stage 4 consolidated the CWE list into `src/llm/taxonomy.py`.** The two
+   prompts each carried their own copy and had already drifted to **18 CWEs and
+   7**, so the modes were being compared as though they differed only in tool
+   access. Both now share one list. This is a bigger change to the single-pass
+   mode than Stage 4 itself.
+5. **Stage 5 adds no `--exclude-scope` flag.** `scoped_metrics` is always
+   computed and published beside the headline, which delivers the reporting value
+   without offering a switch that makes the headline number quietly scoped.
+6. **Stage 6 excludes chunks from `bootstrap`'s generated rows.** A skeleton row
+   defaults to clean, so auto-generating rows for chunks would turn any finding
+   inside one into a false positive against a label nobody read — the exact
+   failure the 2026-08-11 verification pass existed to undo. Coverage counts rows,
+   so analysing a function as chunks does not raise it.
+7. **Out of plan: fixed a pre-existing flaky test.** `CostLedger.by_run` ordered
+   by timestamp alone, and events written in the same instant tie, so `--limit`
+   dropped an arbitrary run rather than the oldest. It failed roughly one run in
+   five on the clean tree. `MAX(rowid)` now breaks the tie.
 
 ---
 
@@ -62,7 +88,7 @@ dependency is Stage 0, which is what makes the rest attributable.
 | 2 | Evidence gate for flow CWEs | **−8 FP** | S | 0 |
 | 3 | Attribution: `attributed_to` / `also_implicates` | **+3 TP, −3 FP, −3 FN** | M | 0 |
 | 4 | Taxonomy expansion + rule rewrites | **−4 to −6 FN** | S | 0 |
-| 5 | Scope exclusions reported both ways | −5 FP (reported variant) | S | 0 |
+| 5 | Scope exclusions reported both ways | −6 FP (measured, reported variant) | S | 0 |
 | 6 | Oversized-function chunking | coverage 0.997 → 1.000 | M | 1 |
 | 7 | Flow-level second pass | targets the 13-row NEITHER bucket | L | 1, 3 |
 
@@ -877,3 +903,92 @@ deserves its own measurement against the same baseline.
    experiment design.
 
 Re-run and re-score after each. Expect ~$2–4 per re-run with a warm edge cache.
+
+
+---
+
+## Appendix — what was actually built, per stage
+
+Written after implementation. Where a stage's own section above states an
+expectation, this records what the code does and what could be checked without
+spending anything.
+
+### Stage 3 — attribution
+
+`src/llm/attribution.py`. Findings carry `attributed_to` and `also_implicates`
+(capped at 3, enforced at parse time). The evaluator runs a second assignment
+pass in which a **missed vulnerable row** may claim a finding that named it.
+
+Two adjustments, and only these two:
+  - a missed vulnerable row that a finding explicitly named becomes a detection
+    (FN → TP);
+  - a false alarm that was in fact that same detection stops counting as an
+    independent one (FP → TN).
+
+The second only ever fires because the first did, so the only way to erase a
+false positive is to have genuinely found a vulnerability that was otherwise
+missed. Implicating a clean row, or one already detected, buys nothing — there
+are tests for both.
+
+`detection_metrics` stays strict and remains the headline.
+`detection_metrics_attribution_aware` is published beside it, with
+`attribution_summary` naming every row the two differ on and every verdict
+carrying its own `match_basis`. The three pairs this targets were identified
+from the baseline **before** the mechanism existed; they are listed in the
+Stage 3 section so a reader can check nothing else crept in.
+
+### Stage 4 — taxonomy
+
+`src/llm/taxonomy.py`, shared by both prompts. Added CWE-345, 425, 776, 916,
+200, each with narrowing text — CWE-916 without it matches any `createHash`
+call, CWE-425 any `sendFile`. `ADDED_IN_STAGE_4` is exported as data so a
+re-run's new false positives can be attributed per class and an individual
+addition rolled back if it does not pay for itself.
+
+CWE-347 rewritten around pinned algorithm lists rather than `decode` vs
+`verify`. The feature-flag rule is separate and applies to all classes.
+
+### Stage 6 — chunking
+
+Splits at **top-level statement boundaries only**, so a chunk is always a run of
+whole statements. On juice-shop `configureApp` (514 lines) becomes 3 chunks of
+200/128/183 lines at true file-relative line numbers 171–370, 371–498, 500–682 —
+covering all five of its project-marked vulnerable lines.
+
+Line numbers are byte-exact because `run_saver` clamps `affected_lines` to a
+sample's own range; prepending even a one-line header would shift every line in
+the chunk. The part-of-N context is therefore a separate prompt block, not a
+comment in the code.
+
+Chunks get no call-graph node (the graph stayed at 1101 nodes, unchanged) and no
+ground-truth row. A single statement longer than the limit leaves the function
+skipped rather than emitting one chunk identical to what was already declined.
+
+### Stage 7 — flow pass
+
+`--flow-pass`, plus `--flow-max-groups` to cap spend. Three grouping strategies
+produce **76 groups** on juice-shop (11 producer/consumer, 46 route cluster,
+19 model writers), de-duplicated so no group is a subset of another.
+
+The producer/consumer strategy is the one with a demonstrated miss behind it,
+and it now groups **`generateCoupon` + `discountFromCoupon` + `applyCoupon`** —
+the execution-proven CWE-345 forgery, all three in one prompt. Getting there
+needed a fix: stripping only the first matching verb left `discountFromCoupon`
+reducing to `discountcoupon`, which never equalled `generateCoupon`'s `coupon`.
+Subjects are now compared by containment, with a minimum length so short
+fragments do not pair unrelated functions.
+
+Flow findings carry `analysis_mode="flow_pass"` and must name a function that
+was in their own prompt, or they are dropped — a finding pointing outside the
+group is not evidence about anything the model was shown, and an unscoreable
+finding is not a result.
+
+### What still needs a human
+
+- **The re-run.** Every projection in this document is unmeasured.
+- **Ground-truth rows for the three `configureApp` chunks** (Stage 6). Until
+  those exist, chunk findings score as nothing at all — neither TP nor FP.
+- **Whether the added CWE classes pay for themselves** (Stage 4). Check the
+  regression column per class.
+- **Whether `missing_source` predicts false positives** (Stage 2). If it does,
+  the gate can become a suppression rule; if not, it stays a reporting field.

@@ -23,6 +23,10 @@ class LLMConfig:
 @dataclass
 class IngestionConfig:
     max_function_lines: int = 200
+    # Analyse a function longer than max_function_lines as a series of chunks
+    # rather than dropping it. Off restores the previous behaviour, so the two
+    # stay directly comparable.
+    chunk_oversized: bool = True
     # Defaults come from the extractor so the two cannot drift apart — a config
     # default narrower than the extractor's would silently start walking dirs
     # (coverage/, .venv/) that were previously excluded from every dataset.
@@ -104,6 +108,7 @@ def load_config(path: Optional[str] = None) -> AppConfig:
         ingestion=IngestionConfig(
             max_function_lines=ing_raw.get("max_function_lines", 200),
             skip_dirs=ing_raw.get("skip_dirs", sorted(DEFAULT_SKIP_DIRS)),
+            chunk_oversized=ing_raw.get("chunk_oversized", True),
         ),
         output=OutputConfig(
             results_folder=out_raw.get("results_folder", "experiments/results"),

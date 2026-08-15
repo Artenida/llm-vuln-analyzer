@@ -52,10 +52,24 @@ class GroundTruthDataset:
     # defaults every row to clean, so scoring against one before curation
     # produces meaningless numbers rather than an obvious error.
     curation_status: dict = field(default_factory=dict)
+    # Named groups of files that can be scored separately, e.g. an application's
+    # own test harness. Declared in the dataset rather than passed to the
+    # analyzer: telling the analyzer which files not to flag, on a dataset whose
+    # answer key derives from those same exclusions, would be tuning to the key.
+    # {"harness": {"description": ..., "files": [...]}}
+    scoring_scopes: dict = field(default_factory=dict)
 
     @property
     def needs_curation(self) -> bool:
         return bool(self.curation_status) and not self.curation_status.get("reviewed", False)
+
+    def scope_files(self, scope: str) -> list:
+        """Normalised file list for a named scope, or [] if it does not exist."""
+        spec = (self.scoring_scopes or {}).get(scope) or {}
+        return [
+            str(f).replace("\\", "/").lower().lstrip("/")
+            for f in (spec.get("files") or [])
+        ]
 
 
 def load_ground_truth(path: str | Path) -> GroundTruthDataset:
@@ -84,6 +98,7 @@ def load_ground_truth(path: str | Path) -> GroundTruthDataset:
         source_path=data.get("source_path", ""),
         entries=entries,
         curation_status=data.get("curation_status", {}) or {},
+        scoring_scopes=data.get("scoring_scopes", {}) or {},
     )
 
 

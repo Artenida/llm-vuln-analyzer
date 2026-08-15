@@ -123,10 +123,23 @@ class TestTreeSitterParser:
         assert isinstance(fns, list)
 
     def test_max_function_lines_respected(self):
+        """Over the limit, the function is no longer analysed whole — it is
+        sliced. Nothing named `long_function` itself is returned."""
         long_fn = "def long_function():\n" + "    pass\n" * 300
         parser = TreeSitterParser(max_function_lines=50)
         fns = parser.extract_functions(long_fn, "python")
-        assert len(fns) == 0, "Function over line limit should be skipped"
+        assert "long_function" not in [f.name for f in fns]
+        assert all(f.chunk_of == "long_function" for f in fns)
+        assert parser.last_skipped[0].chunked
+
+    def test_chunking_can_be_turned_off(self):
+        """The previous behaviour stays one setting away, so the two are
+        directly comparable."""
+        long_fn = "def long_function():\n" + "    pass\n" * 300
+        parser = TreeSitterParser(max_function_lines=50, chunk_oversized=False)
+        fns = parser.extract_functions(long_fn, "python")
+        assert len(fns) == 0
+        assert parser.last_skipped[0].chunked is False
 
     def test_oversized_function_is_reported_not_silently_dropped(self):
         """An unreported skip shrinks the denominator of every coverage and
@@ -293,7 +306,7 @@ class TestCodeExtractor:
         f = tmp_path / "big.py"
         f.write_text("def small():\n    return 1\n\n"
                      "def big():\n" + "    pass\n" * 300)
-        extractor = CodeExtractor(max_function_lines=50)
+        extractor = CodeExtractor(max_function_lines=50, chunk_oversized=False)
         samples = extractor.from_path(f)
 
         assert [s.function_name for s in samples] == ["small"]
@@ -520,3 +533,106 @@ class TestRouteExtraction:
         samples = extractor.from_snippet(EXPRESS_CODE, Language.TYPESCRIPT)
         assert samples == [] or all(s.function_name != "configureApp" for s in samples)
         assert len(extractor.all_routes) >= 8
+
+
+# ── chunking of oversized functions ───────────────────────────────────────────
+
+EXPRESS_BIG = "function configureApp (app) {\n" + "".join(
+    f"  app.get('/r{i}', handler{i})\n" for i in range(60)
+) + "}\n"
+
+
+class TestChunking:
+    """juice-shop's server.ts::configureApp is 514 lines, over the limit, and
+    holds the whole route table plus five project-marked vulnerable lines. It was
+    the one function the extractor dropped."""
+
+    def _chunks(self, max_lines=20):
+        parser = TreeSitterParser(max_function_lines=max_lines)
+        return parser, parser.extract_functions(EXPRESS_BIG, "typescript")
+
+    def test_oversized_function_is_sliced(self):
+        _, fns = self._chunks()
+        assert len(fns) > 1
+        assert all(f.chunk_of == "configureApp" for f in fns)
+
+    def test_every_chunk_is_within_the_limit(self):
+        _, fns = self._chunks(max_lines=20)
+        for f in fns:
+            assert f.end_line - f.start_line + 1 <= 20
+
+    def test_chunks_are_numbered_and_know_the_total(self):
+        _, fns = self._chunks()
+        assert [f.chunk_index for f in fns] == list(range(1, len(fns) + 1))
+        assert all(f.chunk_total == len(fns) for f in fns)
+
+    def test_line_numbers_stay_file_relative(self):
+        """run_saver clamps affected_lines to a sample's own range, so a chunk
+        whose line numbers were relative to itself would have every finding
+        clamped away."""
+        _, fns = self._chunks()
+        lines = EXPRESS_BIG.splitlines()
+        for f in fns:
+            assert lines[f.start_line - 1].strip() == f.body.splitlines()[0].strip()
+
+    def test_chunks_do_not_overlap_and_stay_in_order(self):
+        _, fns = self._chunks()
+        for a, b in zip(fns, fns[1:]):
+            assert a.end_line < b.start_line
+
+    def test_chunks_carry_no_ast_node(self):
+        """A chunk is a prompt unit, not a semantic function — it must not become
+        a call-graph node asserting edges the source does not have."""
+        _, fns = self._chunks()
+        assert all(f.ast_node is None for f in fns)
+
+    def test_skip_record_says_it_was_covered(self):
+        parser, _ = self._chunks()
+        sk = parser.last_skipped[0]
+        assert sk.chunked is True
+        assert sk.chunk_count > 1
+
+    def test_a_body_with_one_huge_statement_is_left_skipped(self):
+        """Nothing to split on. Emitting a single chunk identical to the function
+        we already declined to analyse would just relabel the problem."""
+        code = "function f () {\n  const x = {\n" + "    a: 1,\n" * 300 + "  }\n}\n"
+        parser = TreeSitterParser(max_function_lines=20)
+        fns = parser.extract_functions(code, "typescript")
+        assert [f for f in fns if f.chunk_of] == []
+        assert parser.last_skipped[0].chunked is False
+
+    def test_chunks_reach_the_extractor_as_samples(self):
+        extractor = CodeExtractor(max_function_lines=20)
+        samples = extractor.from_snippet(EXPRESS_BIG, Language.TYPESCRIPT)
+        chunks = [s for s in samples if s.is_chunk]
+        assert chunks
+        assert all(s.chunk_of == "configureApp" for s in chunks)
+
+    def test_chunks_are_not_call_graph_nodes(self):
+        from src.context.call_graph import CallGraphBuilder
+
+        extractor = CodeExtractor(max_function_lines=20)
+        samples = extractor.from_snippet(EXPRESS_BIG, Language.TYPESCRIPT)
+        graph, _ = CallGraphBuilder().build(samples, routes=[])
+        assert not any("#" in node_id for node_id in graph)
+
+    def test_prompt_tells_the_model_it_is_seeing_a_part(self):
+        from src.context.route_context import format_chunk_note
+
+        extractor = CodeExtractor(max_function_lines=20)
+        samples = extractor.from_snippet(EXPRESS_BIG, Language.TYPESCRIPT)
+        chunk = next(s for s in samples if s.is_chunk)
+        note = format_chunk_note(chunk)
+
+        assert "PART OF A LARGER FUNCTION" in note
+        assert f"part {chunk.chunk_index} of {chunk.chunk_total}" in note
+        # The risk this stage introduces: a guard in chunk 1 protecting a route
+        # in chunk 2 looks missing.
+        assert "still in effect" in note
+
+    def test_no_note_for_a_normal_function(self):
+        from src.context.route_context import format_chunk_note
+
+        extractor = CodeExtractor()
+        sample = extractor.from_snippet(JS_CODE, Language.JAVASCRIPT)[0]
+        assert format_chunk_note(sample) == ""

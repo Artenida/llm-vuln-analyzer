@@ -36,8 +36,12 @@ class CodeExtractor:
     """
 
     def __init__(self, max_function_lines: int = 200,
-                 skip_dirs: Optional[Iterable[str]] = None):
-        self.parser = TreeSitterParser(max_function_lines=max_function_lines)
+                 skip_dirs: Optional[Iterable[str]] = None,
+                 chunk_oversized: bool = True):
+        self.parser = TreeSitterParser(
+            max_function_lines=max_function_lines,
+            chunk_oversized=chunk_oversized,
+        )
         # None means "use the defaults"; an explicit empty list means "walk
         # everything", which is a legitimate (if unusual) request.
         self.skip_dirs = set(SKIP_DIRS) if skip_dirs is None else set(skip_dirs)
@@ -148,11 +152,19 @@ class CodeExtractor:
         for sk in self.parser.last_skipped:
             sk.file_path = file_path
             self._skipped_functions.append(sk)
-            logger.warning(
-                "Skipping %s in %s — %d lines exceeds max_function_lines (%d); "
-                "it will not be analysed",
-                sk.name, file_path, sk.line_count, self.parser.max_function_lines,
-            )
+            if sk.chunked:
+                logger.info(
+                    "%s in %s is %d lines, over max_function_lines (%d) — analysing "
+                    "it as %d chunk(s)",
+                    sk.name, file_path, sk.line_count,
+                    self.parser.max_function_lines, sk.chunk_count,
+                )
+            else:
+                logger.warning(
+                    "Skipping %s in %s — %d lines exceeds max_function_lines (%d); "
+                    "it will not be analysed",
+                    sk.name, file_path, sk.line_count, self.parser.max_function_lines,
+                )
 
         if not functions:
             logger.debug("No functions extracted from %s", file_path)
@@ -180,6 +192,9 @@ class CodeExtractor:
                 raw_content=content,
                 imports=imports,
                 routes=routes,
+                chunk_of=fn.chunk_of,
+                chunk_index=fn.chunk_index,
+                chunk_total=fn.chunk_total,
             ))
 
         return samples

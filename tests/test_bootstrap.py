@@ -129,7 +129,7 @@ def test_oversized_functions_recorded_as_outside_metrics(tmp_path):
         "def small():\n    return 1\n\ndef big():\n" + "    pass\n" * 300,
         encoding="utf-8",
     )
-    extractor = CodeExtractor(max_function_lines=50)
+    extractor = CodeExtractor(max_function_lines=50, chunk_oversized=False)
     samples = extractor.from_path(tmp_path)
     payload = build_ground_truth(
         samples, extractor.skipped_functions, tmp_path, "demo", str(tmp_path)
@@ -141,6 +141,32 @@ def test_oversized_functions_recorded_as_outside_metrics(tmp_path):
     assert cov["skipped_oversized"][0]["function_name"] == "big"
     # and it must NOT appear as a scoreable row
     assert "big" not in {f["function_name"] for f in payload["functions"]}
+
+
+def test_chunks_never_become_ground_truth_rows(tmp_path):
+    """A skeleton row defaults to clean. Auto-generating rows for chunks would
+    turn any finding inside one into a false positive against a label nobody
+    read — the exact failure the full verification pass had to undo."""
+    (tmp_path / "big.py").write_text(
+        "def small():\n    return 1\n\ndef big():\n" + "    pass\n" * 300,
+        encoding="utf-8",
+    )
+    extractor = CodeExtractor(max_function_lines=50)
+    samples = extractor.from_path(tmp_path)
+    payload = build_ground_truth(
+        samples, extractor.skipped_functions, tmp_path, "demo", str(tmp_path)
+    )
+
+    names = {f["function_name"] for f in payload["functions"]}
+    assert names == {"small"}
+    assert not any("#" in n for n in names)
+
+    cov = payload["coverage"]
+    assert cov["functions_covered_as_chunks"] == 1
+    assert cov["chunks_produced"] > 1
+    # Coverage counts rows, so analysing a function as chunks must not raise it.
+    assert cov["coverage"] == 0.5
+    assert cov["skipped_oversized"][0]["chunked"] is True
 
 
 # ── fix-commit pre-marking ───────────────────────────────────────────────────

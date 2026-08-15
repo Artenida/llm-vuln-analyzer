@@ -73,6 +73,28 @@ def format_route_block(
     return "\n".join(lines)
 
 
+def format_chunk_note(sample) -> str:
+    """A `=== PART OF A LARGER FUNCTION ===` block, or "" for a normal sample.
+
+    Rendered as its own block rather than prepended to the code, because adding
+    even one header line to the body would shift every line number in the chunk —
+    and affected_lines are clamped to the sample's own range when the run is
+    saved.
+    """
+    if not getattr(sample, "chunk_of", None):
+        return ""
+    return (
+        "=== PART OF A LARGER FUNCTION ===\n"
+        f"This is part {sample.chunk_index} of {sample.chunk_total} of "
+        f"'{sample.chunk_of}', which was too long to analyse in one piece.\n"
+        "Statements outside this part are NOT shown. Anything set up earlier in "
+        "the function — a guard registered before this point, a variable assigned "
+        "above — is still in effect here.\n"
+        "Report only what is wrong in the lines you can see, and do not report a "
+        "missing setup step that an unseen part may perform."
+    )
+
+
 def _location(reg: dict) -> str:
     file_path = reg.get("source_file") or ""
     line: Optional[int] = reg.get("source_line")
