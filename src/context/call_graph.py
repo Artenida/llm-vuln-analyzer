@@ -62,19 +62,39 @@ class CallGraphBuilder:
         run_id: Optional[str] = None,
         dataset: Optional[str] = None,
         offline_edges: bool = False,
+        budget_usd: Optional[float] = None,
     ):
         self.parser = TreeSitterParser()
         self.symbol_resolver = SymbolResolver()
         self.llm_resolver = LLMEdgeResolver(
             api_key, model=model, api_key_alias=api_key_alias,
             cost_ledger=cost_ledger, run_id=run_id, dataset=dataset,
-            offline=offline_edges,
+            offline=offline_edges, budget_usd=budget_usd,
         ) if api_key else None
 
     def get_offline_misses(self) -> int:
         """Edges left unresolved because edge resolution was offline (dry run).
         Always 0 on a normal run."""
         return self.llm_resolver.offline_misses if self.llm_resolver else 0
+
+    @property
+    def budget_exhausted(self) -> bool:
+        """Whether the run's ceiling was reached while resolving edges.
+
+        This phase precedes the analysis loop, so hitting the ceiling here means
+        there is nothing left to analyse with — the caller has to say so rather
+        than proceed as though the graph were complete.
+        """
+        return self.llm_resolver.budget_exhausted if self.llm_resolver else False
+
+    @property
+    def budget_skipped(self) -> int:
+        """Edges left unresolved because the ceiling had been reached."""
+        return self.llm_resolver.budget_skipped if self.llm_resolver else 0
+
+    @property
+    def budget_enforceable(self) -> bool:
+        return self.llm_resolver.budget_enforceable if self.llm_resolver else True
 
     def get_edge_resolution_usage(self) -> Optional[TokenUsage]:
         """Cumulative token usage spent resolving call graph edges via the LLM

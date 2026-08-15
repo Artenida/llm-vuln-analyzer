@@ -210,15 +210,34 @@ reads as catastrophic rather than unfinished.
 python -m src.cli analyze ... --react --budget-usd 5.00
 ```
 
-Checked between functions, so the final total can exceed the ceiling by at most
-one function's cost. It counts *this run's* spend including edge resolution and
-anything already done in a resumed run — otherwise a resumed run would get a
-fresh budget on every restart. On reaching the ceiling the run stops, saves
-what completed, and prints the resume command.
+The ceiling covers the whole run and is enforced at **both** phases that spend:
+
+| Phase | Checked | Overshoot |
+|---|---|---|
+| Call-graph edge resolution | before every paid call | at most one edge |
+| Analysis loop | between functions | at most one function |
+
+It counts *this run's* spend including edge resolution and anything already done
+in a resumed run — otherwise a resumed run would get a fresh budget on every
+restart. On reaching the ceiling the run stops, saves what completed, and prints
+the resume command.
+
+> **Why edge resolution is checked per call.** It was originally checked only
+> between functions, and edge resolution runs *before* the analysis loop — so on
+> a large codebase the ceiling bounded nothing. A Juice Shop run with
+> `--budget-usd 5.0` billed **$31** without ever entering the loop that enforces
+> it; four days after launch it was still resolving edges, resuming every time
+> the machine woke. A phase with no functions to sit between needs its own check.
+
+Hitting the ceiling during edge resolution degrades exactly like `--dry-run`:
+the remaining edges resolve to unknown rather than to a purchase, the partial
+graph is still written, and the run reports how many edges it skipped. Nothing
+paid for is lost — every resolved edge was already written to `edge_cache.json`
+as it arrived, so a re-run with a higher ceiling starts where this one stopped.
 
 If the model is not in `PRICING`, spend is unknown and the ceiling cannot be
-enforced: the run says so once and continues without it. Treating unknown cost
-as $0 would silently make the ceiling meaningless.
+enforced: the run says so once *per phase* and continues without it. Treating
+unknown cost as $0 would silently make the ceiling meaningless.
 
 Per-run output now ends with a phase breakdown:
 

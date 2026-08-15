@@ -142,9 +142,11 @@ alias per call instead of once at startup.
 
 - **No key rotation/failover/round-robin.** See "Multi-API-key attribution"
   above — deliberately scoped to attribution, not dispatch.
-- **No budget enforcement.** A `--budget-usd` ceiling on `analyze` needs
-  Sprint 6.1's batch/checkpoint-resume work first, to save a partial run
-  cleanly mid-stream.
+- ~~**No budget enforcement.**~~ Shipped: `analyze --budget-usd` caps a run at
+  both phases that spend — before every call during call-graph edge resolution,
+  and between functions in the analysis loop. See
+  [`pipeline.md` § Capping spend](pipeline.md#capping-spend). Enforcing it in
+  only one of the two is what let a run bill $31 against a $5 ceiling.
 - **No retroactive cost for old runs.** Runs saved before token capture
   existed have no `token_usage` in their JSON and no rows in the ledger —
   unrecoverable after the fact.
