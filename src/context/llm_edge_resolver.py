@@ -19,7 +19,7 @@ from typing import Optional
 from src.context.edge_cache import EdgeCache
 from src.llm.cost_ledger import CostLedger
 from src.llm.openai_client import OpenAIResolver
-from src.llm.pricing import TokenUsage
+from src.llm.pricing import TokenUsage, estimate_cost
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +60,26 @@ class LLMEdgeResolver:
         run_id: Optional[str] = None,
         dataset: Optional[str] = None,
         offline: bool = False,
+        budget_usd: Optional[float] = None,
     ):
         self.client = OpenAIResolver(
             api_key, model=model, api_key_alias=api_key_alias,
             cost_ledger=cost_ledger, run_id=run_id, dataset=dataset,
         )
+        self.model = model
         self.cache = EdgeCache(
             cache_path or _DEFAULT_CACHE_PATH
         )
+        # Spending ceiling for the whole run, enforced here as well as in the
+        # analysis loop. Edge resolution runs *before* that loop, so a ceiling
+        # checked only between functions does not bound it at all: on a large
+        # codebase this phase can be the entire cost of a run and never reach
+        # the code that would stop it. A Juice Shop run billed $31 against a $5
+        # ceiling exactly this way — it was still resolving edges four days in.
+        self.budget_usd = budget_usd
+        self._budget_exhausted = False
+        self._budget_enforceable = True
+        self._budget_skipped = 0
         # Offline: serve from cache, never call the API. Used by `analyze
         # --dry-run`, which is documented as making no LLM calls — building the
         # graph through the normal path would bill edge resolution before the
@@ -90,6 +102,58 @@ class LLMEdgeResolver:
     def offline_misses(self) -> int:
         """Edges an offline run declined to resolve. Zero on a normal run."""
         return self._offline_misses
+
+    @property
+    def budget_exhausted(self) -> bool:
+        """Whether the ceiling stopped edge resolution before it finished."""
+        return self._budget_exhausted
+
+    @property
+    def budget_skipped(self) -> int:
+        """Edges left unresolved because the ceiling had been reached."""
+        return self._budget_skipped
+
+    @property
+    def budget_enforceable(self) -> bool:
+        """False once a ceiling was asked for but the model has no pricing."""
+        return self._budget_enforceable
+
+    def spend_usd(self) -> Optional[float]:
+        """What edge resolution has cost so far, or None if the model is not
+        priced. Only real calls count — cache hits never reach the client."""
+        return estimate_cost(self.model, self.client.get_usage())
+
+    def _over_budget(self) -> bool:
+        """Whether the ceiling has been reached. Checked before *every* paid call.
+
+        Per-call rather than per-function: this phase has no functions to sit
+        between, and one unbounded phase is all it takes to blow a ceiling by 6x.
+        """
+        if self.budget_usd is None or self._budget_exhausted:
+            return self._budget_exhausted
+
+        spent = self.spend_usd()
+        if spent is None:
+            # Unknown pricing. Enforcing nothing is bad; treating unknown cost as
+            # $0 would be worse, because it silently uncaps the run while looking
+            # capped. Report it once and continue — the same trade the analysis
+            # loop makes with the same problem.
+            if self._budget_enforceable:
+                self._budget_enforceable = False
+                logger.warning(
+                    "--budget-usd cannot be enforced during edge resolution: %s is not "
+                    "in the pricing table, so spend is unknown.", self.model,
+                )
+            return False
+
+        if spent >= self.budget_usd:
+            self._budget_exhausted = True
+            logger.warning(
+                "Budget ceiling reached during edge resolution: $%.4f of $%.4f.",
+                spent, self.budget_usd,
+            )
+            return True
+        return False
 
     def get_usage(self) -> TokenUsage:
         """Cumulative token usage from real LLM calls only — cache hits in
@@ -171,6 +235,13 @@ class LLMEdgeResolver:
         if self.offline:
             self._offline_misses += 1
             return {"target": None, "confidence": 0.0, "resolved_by": "offline_skip"}
+
+        # ── budget ceiling ────────────────────────────────────────────────────
+        # Degrades exactly like offline mode rather than raising: the edges
+        # resolved so far are real and the graph they form is worth keeping.
+        if self._over_budget():
+            self._budget_skipped += 1
+            return {"target": None, "confidence": 0.0, "resolved_by": "budget_skip"}
 
         # ── LLM call ──────────────────────────────────────────────────────────
         payload = {

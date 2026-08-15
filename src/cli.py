@@ -279,6 +279,10 @@ def analyze(
         api_key=resolved_key, model=config.llm.model,
         api_key_alias=key_alias, cost_ledger=ledger, run_id=run_id, dataset=dataset,
         offline_edges=dry_run,
+        # The ceiling covers the whole run, this phase included. Without it here
+        # --budget-usd bounds nothing until the analysis loop is reached, which
+        # on a large codebase can be hours or days of paid calls away.
+        budget_usd=budget_usd,
     )
     graph, name_index = builder.build(samples, routes=extractor.all_routes)
 
@@ -296,6 +300,28 @@ def analyze(
     if edge_usage and edge_usage.total_tokens:
         cost_label = f"${edge_cost:.4f}" if edge_cost is not None else "unknown (model not in pricing table)"
         typer.echo(f"Edge resolution   : {edge_usage.total_tokens} tokens, {cost_label}")
+
+    if budget_usd is not None and not builder.budget_enforceable:
+        typer.echo(
+            f"\n  --budget-usd cannot be enforced during edge resolution: {config.llm.model} "
+            "is not in the pricing table, so spend is unknown. Continuing without a ceiling "
+            "on this phase — treating unknown cost as $0 would be worse.\n"
+        )
+
+    if builder.budget_exhausted:
+        # Said here and not left to the analysis loop: the loop reports a budget
+        # stop after N functions, which reads as "the analysis ran out of money"
+        # when in fact it never started. The graph is already saved above, and
+        # every edge bought is in the edge cache, so nothing paid for is lost.
+        spent = f"${edge_cost:.4f}" if edge_cost is not None else "the ceiling"
+        typer.echo(
+            f"\n!! Budget ceiling reached while building the call graph — {spent} of "
+            f"${budget_usd:.4f} spent before analysis began.\n"
+            f"   {builder.budget_skipped} edge(s) left unresolved; the graph above is "
+            "incomplete and no functions will be analysed.\n"
+            "   Re-run with a higher --budget-usd. Edges already resolved are cached and "
+            "cost nothing the second time, so the next run starts where this one stopped."
+        )
 
     tools = ToolSet(graph, name_index)
 
@@ -1395,6 +1421,11 @@ def ui(
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the UI in the default browser."
     ),
+    replace: bool = typer.Option(
+        False, "--replace",
+        help="Stop the UI server that is already running and take its place, "
+             "instead of refusing to start."
+    ),
 ):
     """
     Serve the read-only web UI over the experiments tree.
@@ -1402,6 +1433,10 @@ def ui(
     Reads the same artifacts the other commands write (analysis.json,
     extraction.json, call_graph.json, evaluations, patches, cost_ledger.db) —
     it never writes to experiments/, the analyzed project, or the ledger.
+
+    Refuses to start when a UI server is already running: nothing used to stop a
+    second one, and abandoned servers accumulated silently — each one still able
+    to launch paid analysis jobs.
     """
     try:
         import uvicorn
@@ -1413,7 +1448,44 @@ def ui(
         )
         raise typer.Exit(code=1)
 
+    from src.web import instance_lock
     from src.web.app import FRONTEND_DIST
+
+    # ── single instance ───────────────────────────────────────────────────────
+    existing = instance_lock.running_instance()
+    if existing and not replace:
+        typer.echo(
+            f"A UI server is already running.\n"
+            f"  pid     : {existing.pid}\n"
+            f"  address : {existing.url}\n"
+            f"  started : {existing.started_at}\n\n"
+            "Use it, or start again with --replace to stop it and take over.\n"
+            "Running several is what left seventeen abandoned servers behind, each one "
+            "still able to launch paid analysis jobs.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if existing and replace:
+        typer.echo(f"Stopping the UI server already running (pid {existing.pid})…")
+        if not instance_lock.terminate(existing.pid):
+            typer.echo(
+                f"Could not stop pid {existing.pid}. Stop it yourself, then start again.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        instance_lock.release()
+
+    # A free port is checked separately: the lock catches our own servers, this
+    # catches everything else, and an "address already in use" traceback out of
+    # uvicorn tells the user nothing about which is which.
+    if instance_lock.port_in_use(host, port):
+        typer.echo(
+            f"Port {port} is already in use by something else. "
+            f"Pick another with --port.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     url = f"http://{'localhost' if host == '127.0.0.1' else host}:{port}"
 
@@ -1440,13 +1512,20 @@ def ui(
 
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
-    uvicorn.run(
-        "src.web.app:app",
-        host=host,
-        port=port,
-        reload=dev,
-        log_level="info",
-    )
+    instance_lock.acquire(host, port)
+    try:
+        uvicorn.run(
+            "src.web.app:app",
+            host=host,
+            port=port,
+            reload=dev,
+            log_level="info",
+        )
+    finally:
+        # Released on every exit path, including Ctrl-C. A lock left behind is
+        # not fatal — running_instance() discards one whose process is gone —
+        # but clearing it keeps the next start from having to work that out.
+        instance_lock.release()
 
 
 if __name__ == "__main__":

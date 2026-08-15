@@ -513,3 +513,41 @@ standing in a folder that holds results.
 
 Covered by `tests/test_web_open_results.py` (8 tests, weighted towards the
 refusals). **Not yet checked in a real browser** — same gap as §9.
+
+---
+
+## 12. One UI server at a time
+
+`ui` refuses to start when a UI server is already running, and prints the pid,
+address and start time of the one that is. `--replace` stops it and takes over.
+
+This is not tidiness. Nothing previously stopped a second server, so every
+restart that did not shut down cleanly left the old one alive: **seventeen**
+accumulated on ports 8123–8162 in one evening. None of them spends money by
+itself, but each is a live endpoint that can launch a paid analysis job, and the
+job it launches outlives it — a Juice Shop run started from one of them was
+still billing four days later, long after every window that could have stopped
+it was closed.
+
+`src/web/instance_lock.py` holds the guard. The lock file in `.vulnui/` records
+pid, host and port, and a server counts as running only when the pid is alive
+**and** its port is still bound. Both signals are required because either alone
+fails in a way that makes the guard worse than nothing:
+
+| Signal alone | Failure |
+|---|---|
+| pid | A server killed without releasing its lock would lock the user out of ever starting another — the exact state a force-kill leaves behind. Pids are also recycled, so a stale entry eventually names an unrelated process. |
+| port | Misses the case that caused this. Those seventeen servers were each on a *different* port, so nothing collided. |
+
+The requested port is then checked separately, so "something else is on 8000"
+gets its own message rather than a uvicorn `address already in use` traceback.
+
+`pid_alive()` deliberately avoids `os.kill(pid, 0)`, the POSIX idiom for this:
+on Windows `os.kill` maps onto `TerminateProcess`, so the liveness check would
+kill the process it was asking about. It uses `OpenProcess` +
+`GetExitCodeProcess` there and `os.kill` only on POSIX.
+
+Covered by `tests/test_instance_lock.py` (12 tests), and verified end to end:
+a second start on the same port and on a different port both refuse,
+`--replace` takes over, and a hard-killed server's stale lock does not block the
+next start.
