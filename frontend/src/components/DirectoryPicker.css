@@ -136,6 +136,21 @@
   border-top: 1px solid var(--border-soft);
 }
 
+/* Why the confirm button is disabled — said in the dialog rather than after
+   the click. */
+.picker__hint {
+  margin: 0;
+  padding: var(--s2) var(--s4);
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.picker__hint .picker__tag {
+  margin-left: 0;
+}
+
 .picker__error {
   margin: 0;
   padding: 0 var(--s4) var(--s2);

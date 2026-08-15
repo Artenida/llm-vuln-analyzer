@@ -68,6 +68,8 @@ export interface DirListing {
   path: string;
   parent: string | null;
   entries: DirEntry[];
+  /** Whether the listed folder is itself a result bundle. */
+  is_result_dir: boolean;
 }
 
 export interface InspectResult {

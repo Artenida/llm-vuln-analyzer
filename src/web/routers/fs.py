@@ -46,6 +46,10 @@ class ListResponse(BaseModel):
     path: str
     parent: Optional[str] = None
     entries: list[DirEntry]
+    # Whether the listed directory is itself a result bundle. The entries carry
+    # the same flag for their own sake, but a picker that must land *on* a
+    # results folder needs to know about the one it is standing in.
+    is_result_dir: bool = False
 
 
 class InspectRequest(BaseModel):
@@ -111,7 +115,12 @@ def list_directory(
         raise HTTPException(status_code=400, detail=f"Could not read that directory: {exc}")
 
     parent = str(directory.parent) if directory.parent != directory else None
-    return ListResponse(path=str(directory), parent=parent, entries=entries)
+    return ListResponse(
+        path=str(directory),
+        parent=parent,
+        entries=entries,
+        is_result_dir=paths.looks_like_result_dir(directory),
+    )
 
 
 @router.post("/inspect", response_model=InspectResponse)

@@ -21,6 +21,7 @@ export function DirectoryPicker({
   title = "Select a folder",
   confirmLabel = "Use this folder",
   allowCreate = false,
+  requireResultDir = false,
 }: {
   initialPath?: string | null;
   onPick: (path: string) => void;
@@ -28,6 +29,12 @@ export function DirectoryPicker({
   title?: string;
   confirmLabel?: string;
   allowCreate?: boolean;
+  /**
+   * Only allow picking a folder that already holds run artifacts. Used when
+   * opening previous results, where any other folder is certain to be refused
+   * by the server — better to say so in the dialog than after the click.
+   */
+  requireResultDir?: boolean;
 }) {
   const { data: roots } = useFsRoots();
   const [path, setPath] = useState<string | null>(initialPath ?? null);
@@ -154,6 +161,14 @@ export function DirectoryPicker({
 
         {createError && <p className="picker__error">{createError}</p>}
 
+        {requireResultDir && listing.data && !listing.data.is_result_dir && (
+          <p className="picker__hint">
+            This folder holds no results. Open the folder a run wrote to — it
+            contains <span className="mono">analysis.json</span>. Folders tagged{" "}
+            <span className="picker__tag">results</span> above are the ones.
+          </p>
+        )}
+
         <footer className="picker__footer">
           <span className="picker__current mono" title={listing.data?.path ?? typed}>
             {listing.data?.path ?? typed ?? "—"}
@@ -165,7 +180,10 @@ export function DirectoryPicker({
             <Button
               variant="primary"
               onClick={() => onPick(listing.data?.path ?? typed)}
-              disabled={!listing.data && !typed}
+              disabled={
+                (!listing.data && !typed) ||
+                (requireResultDir && !listing.data?.is_result_dir)
+              }
             >
               {confirmLabel}
             </Button>

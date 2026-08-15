@@ -196,6 +196,27 @@ export function useResult(path: string | null) {
   });
 }
 
+/**
+ * Open a results folder produced elsewhere — another session, another machine,
+ * or a plain CLI run.
+ *
+ * Reads are authorised against the registry of directories this tool has
+ * written to, so a folder it has never seen is unreadable until this call
+ * registers it. The server refuses anything that does not already contain run
+ * artifacts, so this widens what can be read without making it a file browser.
+ */
+export function useOpenResults() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (path: string) => api.post<ResultSummary>("/results/open", { path }),
+    onSuccess: (data) => {
+      // The folder was unreadable a moment ago; any negative cached result for
+      // it has to go, or the Results page would render the old failure.
+      client.invalidateQueries({ queryKey: ["result", data.output_dir] });
+    },
+  });
+}
+
 export function useFindings(path: string | null, enabled = true) {
   return useQuery({
     queryKey: ["findings", path],

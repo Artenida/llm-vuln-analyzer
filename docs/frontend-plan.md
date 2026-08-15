@@ -158,6 +158,7 @@ findings.
 | **Cost estimate** | Projected from the ledger's measured $/function for the chosen mode × the estimated function count. Shown in the confirm step. Says "no measured rate yet" rather than guessing when the ledger has no data for that mode. |
 | **Analyze** | Confirm dialog stating projected cost and output path → job starts. |
 | **Live progress** | Function counter and progress bar parsed from the CLI's own per-function output, a streaming log, running spend, and Cancel (which leaves a resumable checkpoint). |
+| **Open previous results** | A path field and the same Browse dialog, for reading a run this session did not produce — an earlier session, another machine, or a plain CLI run. It points `lastResultDir` at that folder, so Results and Evaluations follow. Deliberately one action and not a list of past runs — see §11. |
 
 ### 5.2 Results — `/results?path=`
 
@@ -212,6 +213,7 @@ GET  /api/jobs/{id}/events         SSE: log lines, progress, terminal state
 POST /api/jobs/{id}/cancel
 
 GET  /api/results?path=            summary of a result bundle at a directory
+POST /api/results/open             {path} -> register a foreign result dir, then its summary
 GET  /api/results/findings?path=
 GET  /api/results/extraction?path=
 GET  /api/results/graph?path=
@@ -231,7 +233,9 @@ through a shell.
 **Path safety.** Artifact reads resolve against the registry of allowed roots
 (§2). The directory browser is the deliberate exception and may list anywhere,
 because that is what a folder picker does; it returns names and types only,
-never file contents.
+never file contents. `POST /api/results/open` is the only way the browser can
+add to that registry, and it refuses any folder that does not already hold run
+artifacts — see §11.
 
 **Secret safety.** The API key is never sent to the browser and never written to
 the cost ledger, job records or logs — only its alias.
@@ -461,11 +465,51 @@ pointer is in the browser's localStorage, the read authorisation is in
 
 * An existing `.vulnui/history.json` is now dead. Nothing reads or writes it; it
   is left in place rather than deleted, since it is the user's file.
-* **Results produced elsewhere are no longer openable.** `POST /api/history/open`
+* **Results produced elsewhere were no longer openable.** `POST /api/history/open`
   was the recovery path for a result from another machine, a lost registry, or a
-  CLI run — it is gone with the rest. Opening those is a CLI job now. If that
-  turns out to matter, it comes back as an "open a results folder" action on the
-  Analyze page, not as a list of past runs.
+  CLI run, and it went with the rest. It did turn out to matter, and came back
+  exactly as this section predicted — one action on the Analyze page, not a list
+  of past runs. See §11.
 * `Runs billed` on the Costs page counts ledger rows rather than history rows.
   The ledger is the same source `python -m src.cli cost` uses, so the figure
   still cannot disagree with the CLI.
+
+---
+
+## 11. Opening a results folder from a previous run
+
+**Open previous results** on the Analyze page: a path field, the same Browse
+dialog, and an Open button that takes you straight to Results for that folder.
+It is the recovery path §10 removed with the History page and predicted would
+come back — a run from an earlier session, a folder copied off another machine,
+or output from a plain `python -m src.cli analyze`.
+
+It is deliberately *not* the History page returning. There is no list, nothing is
+enumerated, and nothing is recorded beyond the single `lastResultDir` pointer
+that already existed. You name a folder; that folder becomes the run the session
+is reading, and Results and Evaluations both follow it, exactly as they do after
+a live run.
+
+### Why it needs a server call at all
+
+The obvious implementation — set `lastResultDir` in the browser and navigate —
+does not work, and the reason is the point of the feature. Artifact reads are
+authorised against the registry of directories this tool has written to (§2), so
+a folder it has never seen returns `400 not a known result location` no matter
+what the URL says. `POST /api/results/open` is what adds it.
+
+### What it refuses, and why
+
+| Guard | Without it |
+|---|---|
+| The folder must already contain `analysis.json`, `extraction.json` or `call_graph.json` | The endpoint would register *any* directory on request, which is the whole containment rule deleted by one POST. Pointing the dialog at a home folder would authorise reads inside it. |
+| The directory itself is registered, never its parent | Opening one run would make every sibling run — and everything else in that parent — readable. |
+| Reads stay restricted to `paths.RUN_ARTIFACTS` afterwards | A results folder can sit anywhere, including beside files that are none of this tool's business. A registered directory is not a readable directory; it is a directory whose *run artifacts* are readable. The Raw tab still lists other files by name, with `readable: false`, so the folder is never misrepresented. |
+
+The picker helps rather than waiting to refuse: `GET /api/fs/list` reports
+`is_result_dir` for the folder being listed as well as for its children, and the
+dialog disables its confirm button, with the reason stated, until you are
+standing in a folder that holds results.
+
+Covered by `tests/test_web_open_results.py` (8 tests, weighted towards the
+refusals). **Not yet checked in a real browser** — same gap as §9.

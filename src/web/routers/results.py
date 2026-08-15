@@ -34,6 +34,47 @@ def get_summary(path: str = Query(..., description="Run output directory.")) -> 
     return results.summary(directory)
 
 
+class OpenRequest(BaseModel):
+    path: str = Field(..., description="A folder holding a previous run's artifacts.")
+
+
+@router.post("/open")
+def post_open(request: OpenRequest) -> dict:
+    """Authorise reading a result folder this installation did not write.
+
+    Reads are confined to the registry of directories the tool has written to
+    (`paths.register_root`), which is what makes a run from another machine, a
+    run whose registry entry was lost, or a plain CLI run unreadable from here.
+    This is the only way to widen that set from the browser, so it is
+    deliberately narrow: the folder must *already* look like a result bundle.
+    A directory of arbitrary files cannot be registered and then read out of —
+    and even once registered, reads stay restricted to `paths.RUN_ARTIFACTS`.
+
+    Deliberately not a list of past runs: the flow is one codebase, one
+    analysis, that run's results. See docs/frontend-plan.md §10.
+    """
+    try:
+        directory = paths.normalise(request.path)
+    except paths.UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if not directory.is_dir():
+        raise HTTPException(status_code=404, detail=f"No such folder: {directory}")
+
+    if not paths.looks_like_result_dir(directory):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "That folder holds no analysis results. A results folder contains "
+                + ", ".join(paths.RESULT_MARKERS)
+                + "."
+            ),
+        )
+
+    paths.register_root(directory)
+    return results.summary(directory)
+
+
 @router.get("/findings")
 def get_findings(path: str = Query(...)) -> list[dict]:
     return results.findings(_directory(path))

@@ -6,6 +6,7 @@ import {
   useEstimate,
   useInspect,
   useJob,
+  useOpenResults,
   useSettings,
   useStartAnalyze,
 } from "@/api/hooks";
@@ -44,10 +45,14 @@ export function AnalyzePage() {
   } = form;
 
   // Genuinely transient — a half-open dialog should not survive navigation.
-  const [picking, setPicking] = useState<"source" | "output" | null>(null);
+  const [picking, setPicking] = useState<"source" | "output" | "results" | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Also transient: once a folder is opened its path lives on as
+  // `lastResultDir`, so there is nothing here worth persisting.
+  const [openPath, setOpenPath] = useState("");
 
   const inspect = useInspect();
+  const openResults = useOpenResults();
   const estimateMutation = useEstimate();
   const startAnalyze = useStartAnalyze();
   const cancelJob = useCancelJob();
@@ -139,6 +144,23 @@ export function AnalyzePage() {
     });
     // The server may have auto-named the folder — show where results are going.
     update({ jobId: created.id, outputDir: created.output_dir ?? outputDir });
+  }
+
+  // Open a run this session did not produce: an earlier session, another
+  // machine, or a plain `python -m src.cli analyze`. The server call is what
+  // authorises the read — a folder this tool has never written to is not
+  // readable until it is registered. The result then goes through the same
+  // `lastResultDir` pointer the live flow uses, so Results and Evaluations both
+  // follow it. Still one pointer and not a run history: docs/frontend-plan.md §10.
+  async function openPrevious(path: string) {
+    try {
+      const opened = await openResults.mutateAsync(path);
+      update({ lastResultDir: opened.output_dir });
+      navigate(`/results?path=${encodeURIComponent(opened.output_dir)}`);
+    } catch {
+      // Surfaced from openResults.error below — rethrowing would only produce
+      // an unhandled rejection in the console.
+    }
   }
 
   const canStart =
@@ -303,6 +325,55 @@ export function AnalyzePage() {
               </Button>
             )}
           </div>
+
+          <Card
+            title="Open previous results"
+            description="Read a run that already finished — from an earlier session, another machine, or one started on the command line."
+          >
+            <div className="stack-sm">
+              <div className="analyze__pathrow">
+                <TextInput
+                  value={openPath}
+                  onChange={setOpenPath}
+                  placeholder="C:\path\to\a\run\folder"
+                />
+                <Button onClick={() => setPicking("results")}>Browse…</Button>
+                {/* Deliberately not `primary`: Analyze is the page's one primary
+                    action, and this sits directly under it. */}
+                <Button
+                  onClick={() => void openPrevious(openPath)}
+                  disabled={!openPath.trim() || openResults.isPending}
+                >
+                  {openResults.isPending ? "Opening…" : "Open"}
+                </Button>
+              </div>
+
+              {openResults.error && (
+                <div className="note note--error">
+                  <span className="note__label">Could not open</span>
+                  {(openResults.error as Error).message}
+                </div>
+              )}
+
+              {form.lastResultDir && (
+                <div className="row-between">
+                  <span className="mono faint" style={{ fontSize: "var(--fs-xs)" }}>
+                    Currently reading {form.lastResultDir}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      navigate(
+                        `/results?path=${encodeURIComponent(form.lastResultDir!)}`,
+                      )
+                    }
+                  >
+                    Open →
+                  </Button>
+                </div>
+              )}
+            </div>
+          </Card>
         </div>
 
         <div className="stack">
@@ -347,14 +418,27 @@ export function AnalyzePage() {
 
       {picking && (
         <DirectoryPicker
-          title={picking === "source" ? "Select a folder to analyse" : "Select an output folder"}
-          initialPath={picking === "source" ? sourcePath || null : outputDir || settings?.results_root}
+          title={PICKER_TITLE[picking]}
+          initialPath={
+            picking === "source"
+              ? sourcePath || null
+              : picking === "results"
+                ? openPath || form.lastResultDir || settings?.results_root
+                : outputDir || settings?.results_root
+          }
           allowCreate={picking === "output"}
+          // Opening results is the one case where the wrong folder is certain to
+          // be refused by the server, so the dialog says so instead.
+          requireResultDir={picking === "results"}
+          confirmLabel={picking === "results" ? "Open these results" : undefined}
           onCancel={() => setPicking(null)}
           onPick={(path) => {
             if (picking === "source") {
               update({ sourcePath: path });
               void onInspect(path);
+            } else if (picking === "results") {
+              setOpenPath(path);
+              void openPrevious(path);
             } else {
               update({ outputDir: path });
             }
@@ -378,6 +462,12 @@ export function AnalyzePage() {
     </div>
   );
 }
+
+const PICKER_TITLE: Record<"source" | "output" | "results", string> = {
+  source: "Select a folder to analyse",
+  output: "Select an output folder",
+  results: "Select a results folder",
+};
 
 const MODE_HINT: Record<Mode, string> = {
   react:
