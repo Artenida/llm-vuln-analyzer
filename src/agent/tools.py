@@ -142,6 +142,33 @@ class ToolSet:
             "is_external":      self._node_attr(node_id, "is_external"),
         }
 
+    def get_route_context(
+        self, function_name: str, file_path: Optional[str] = None
+    ) -> List[dict]:
+        """HTTP registrations that reach this function, with their guard chains.
+
+        This exists because a call-graph edge is the wrong instrument for
+        Express wiring. Route registration happens inside one large
+        configuration function, so if that function is skipped (juice-shop's
+        `configureApp` is 514 lines, over `max_function_lines`) every handler
+        it registers looks caller-less and therefore unreachable and unguarded.
+        Registrations are read from raw file content instead, so they survive
+        that skip.
+
+        Each entry carries `guards_before`: the middleware Express runs ahead of
+        this function on that route. Those have already executed by the time the
+        target sees the request.
+        """
+        node_id = self._resolve_node_id(function_name, file_path)
+        if not node_id:
+            return []
+        node = self.graph.get(node_id)
+        if node is None:
+            return []
+        if hasattr(node, "route_registrations"):
+            return list(node.route_registrations)
+        return list(node.get("route_registrations", []))
+
     def get_taint_path(
         self, function_name: str, file_path: Optional[str] = None
     ) -> List[str]:

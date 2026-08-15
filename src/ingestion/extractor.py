@@ -157,9 +157,14 @@ class CodeExtractor:
         if not functions:
             logger.debug("No functions extracted from %s", file_path)
 
-        # File-level extractions — shared across all functions in this file
+        # File-level extractions — shared across all functions in this file.
+        # Routes are read from the raw content, so they survive a file whose
+        # registration function was too long to analyse: juice-shop's whole
+        # route table lives inside a 514-line `configureApp` that gets skipped.
         imports = self._import_extractor.extract(content)
-        routes = self._route_extractor.extract(content)
+        routes = self._route_extractor.extract(content, lang_str)
+        for r in routes:
+            r.source_file = file_path
         self._all_routes.extend(routes)
 
         samples = []

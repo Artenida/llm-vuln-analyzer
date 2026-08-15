@@ -32,6 +32,13 @@ class CallGraphNode:
     is_taint_source: bool = False   # receives untrusted user input (e.g. HTTP handlers)
     is_taint_sink: bool = False     # passes data to dangerous operations
 
+    # HTTP registrations that reach this function, each with the guard chain
+    # that runs before it. Without this, a handler whose only caller is an
+    # oversized (and therefore skipped) route-wiring function looks like an
+    # unreachable, unguarded orphan — which is how ten protected juice-shop
+    # handlers were reported as IDOR.
+    route_registrations: List[dict] = field(default_factory=list)
+
 
 ENTRY_POINT_PATTERNS = ["handler", "route", "endpoint", "controller", "main"]
 
@@ -125,6 +132,48 @@ class CallGraphBuilder:
 
         return any(p in function_name.lower() for p in ENTRY_POINT_PATTERNS)
 
+    @staticmethod
+    def _path_covers(guard_path: str, route_path: str) -> bool:
+        """Whether a `use(<guard_path>, ...)` mount runs for `route_path`.
+
+        Express mounts on a path prefix, so `/rest/basket` guards
+        `/rest/basket/:id/order`. The match is made at a segment boundary —
+        `/api/Card` must not be treated as guarding `/api/Cards`.
+        """
+        if not guard_path or not route_path:
+            return False
+        g = guard_path.rstrip("/")
+        r = route_path.rstrip("/")
+        return r == g or r.startswith(g + "/")
+
+    def _prefix_guards_for(self, route, prefix_guards: List) -> List[dict]:
+        """Path-mounted middleware that runs before `route`.
+
+        Only guards registered *earlier in the same file* count: Express applies
+        middleware in registration order, so a `use(...)` declared after a route
+        does not protect it. Getting this backwards would invent authorization
+        that does not exist, which is a worse failure than missing it.
+        """
+        out = []
+        for g in prefix_guards:
+            if g is route or not self._path_covers(g.path, route.path):
+                continue
+            if g.source_file and route.source_file and g.source_file != route.source_file:
+                continue
+            if (
+                g.source_line is not None
+                and route.source_line is not None
+                and g.source_line >= route.source_line
+            ):
+                continue
+            out.append({
+                "path": g.path,
+                "handlers": list(g.handlers),
+                "source_file": g.source_file,
+                "source_line": g.source_line,
+            })
+        return out
+
     def _apply_route_entry_points(
         self,
         graph: Dict[str, "CallGraphNode"],
@@ -136,9 +185,18 @@ class CallGraphBuilder:
                 continue
             name_to_nodes.setdefault(node.function_name, []).append(node_id)
 
+        prefix_guards = [r for r in route_defs if getattr(r, "is_prefix_guard", False)]
+
         for route in route_defs:
-            for h in route.handlers:
-                name = h.strip()
+            # `handler_names` resolves wrapped handlers — the function actually
+            # invoked by `utils.asyncHandler(payment.getPaymentMethods())` is
+            # getPaymentMethods, which the raw handler text does not yield.
+            # Older RouteDefinitions carry only `handlers`, so fall back to it.
+            lookup_names = list(getattr(route, "handler_names", None) or route.handlers)
+            covering = self._prefix_guards_for(route, prefix_guards)
+
+            for raw_name in lookup_names:
+                name = raw_name.strip()
                 if not name:
                     continue
                 # handlers referenced as `object.method` (e.g. billingController.payInvoice)
@@ -146,8 +204,9 @@ class CallGraphBuilder:
                 lookup_name = name.split(".")[-1] if "." in name else name
                 candidates = name_to_nodes.get(lookup_name, [])
 
+                target: Optional[str] = None
                 if len(candidates) == 1:
-                    graph[candidates[0]].is_entry_point = True
+                    target = candidates[0]
                 elif len(candidates) > 1:
                     preferred = [
                         nid for nid in candidates
@@ -157,9 +216,36 @@ class CallGraphBuilder:
                         )
                     ]
                     if len(preferred) == 1:
-                        graph[preferred[0]].is_entry_point = True
+                        target = preferred[0]
                     # else: ambiguous with no clear winner — leave as-is rather
                     # than risk flagging the wrong (e.g. service-layer) function
+
+                if target is None:
+                    continue
+
+                graph[target].is_entry_point = True
+                self._attach_registration(graph[target], route, lookup_name, covering)
+
+    @staticmethod
+    def _attach_registration(node, route, name: str, covering: List[dict]) -> None:
+        entry = {
+            "method": route.method,
+            "path": route.path,
+            "source_file": getattr(route, "source_file", ""),
+            "source_line": getattr(route, "source_line", None),
+            "handlers": list(route.handlers),
+            # What Express ran before this function on this route. This is the
+            # field the analyzer needs: a check performed here has already
+            # happened by the time the target sees the request.
+            "guards_before": (
+                route.guards_before(name)
+                if hasattr(route, "guards_before")
+                else list(route.handlers[:-1])
+            ),
+            "prefix_guards": covering,
+        }
+        if entry not in node.route_registrations:
+            node.route_registrations.append(entry)
 
     def build(
         self,
@@ -389,5 +475,6 @@ def nodes_to_dict(graph: Dict[str, "CallGraphNode"]) -> Dict[str, dict]:
             "is_external":       node.is_external,
             "is_taint_source":   node.is_taint_source,
             "is_taint_sink":     node.is_taint_sink,
+            "route_registrations": list(node.route_registrations),
         }
     return result

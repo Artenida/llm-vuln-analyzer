@@ -87,6 +87,7 @@ from src.results.patch_validator import PatchValidator
 from src.results.export_graph import export_dot, export_html, select_subgraph
 from src.results.save_graph import load_call_graph
 from src.context.call_graph import nodes_to_dict
+from src.context.route_context import format_route_block
 from src.llm.client import LLMClient
 from src.llm.cost_ledger import CostLedger
 from src.llm.pricing import TokenUsage, estimate_cost
@@ -616,12 +617,26 @@ def _build_context_prompt(
         "    in place of a method body is expected and NOT obfuscated/suspicious code — X is a\n"
         "    nested method (e.g. a constructor's `this.foo = function() {...}`) analyzed\n"
         "    independently elsewhere. Do not flag the function containing this comment because of it.\n"
+        "  - Middleware shown in ROUTE CONTEXT as running BEFORE the target has already run,\n"
+        "    including anything it overwrites on the request object. A check performed by a\n"
+        "    guard is not missing from the target. 'No route registration found' means\n"
+        "    unknown, NOT unguarded.\n"
     )
     lines.append("=" * 60)
     lines.append(f"TARGET FUNCTION: {sample.function_name}")
     lines.append(f"File: {sample.file_path}  Lines: {sample.start_line}–{sample.end_line}")
     lines.append("=" * 60)
     lines.append(f"```{lang}\n{sample.code}\n```\n")
+
+    # Same block the ReAct path renders, so the two modes see identical context
+    # and a difference between them still means something about the modes.
+    lines.append(
+        format_route_block(
+            tools.get_route_context(sample.function_name, sample.file_path),
+            sample.function_name,
+        )
+    )
+    lines.append("")
 
     internal_callers = [c for c in callers if not c.startswith("external::")]
     if internal_callers:

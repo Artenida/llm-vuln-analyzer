@@ -285,25 +285,18 @@ def save_call_graph(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / (filename if filename else f"call_graph_{ts}.json")
 
+    # Delegated rather than duplicated: this function used to hand-copy the node
+    # fields, so a field added to CallGraphNode reached the in-memory graph and
+    # the HTML export but silently vanished from the saved JSON.
+    # `route_registrations` was lost that way.
+    from src.context.call_graph import nodes_to_dict
+
     payload = {
         "source_path": source_path,
         "timestamp":   datetime.now().isoformat(),
         "total_nodes": len(graph),
-        "graph":       {},
+        "graph":       nodes_to_dict(graph),
     }
-
-    for name, node in graph.items():
-        payload["graph"][name] = {
-            "function_name":     node.function_name,
-            "file_path":         node.file_path,
-            "callers":           node.callers,
-            "callees":           node.callees,
-            "is_entry_point":    node.is_entry_point,
-            "is_infrastructure": node.is_infrastructure,
-            "is_external":       node.is_external,
-            "is_taint_source":   node.is_taint_source,
-            "is_taint_sink":     node.is_taint_sink,
-        }
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)

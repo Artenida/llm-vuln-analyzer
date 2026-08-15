@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 from src.agent.memory import AgentMemory
 from src.agent.state import AgentState
 from src.agent.tools import ToolSet
+from src.context.route_context import format_route_block
 from src.llm.client import LLMClient, ReActStep, VulnerabilityReport
 from src.llm.pricing import TokenUsage, estimate_cost
 from src.models import CodeSample
@@ -51,6 +52,16 @@ class ReActAgent:
         tool_history: List[dict] = []
         usage_total = TokenUsage()
 
+        # The target's HTTP registrations, resolved once and shown every turn.
+        # Route wiring usually lives in one large configuration function that may
+        # never have been extracted, so this cannot be recovered from the call
+        # graph edges the other tools read.
+        route_context: List[dict] = []
+        if self.tools:
+            route_context = self.tools.get_route_context(
+                sample.function_name, sample.file_path
+            )
+
         # Inject prior findings for callers/callees from this run's memory
         if self.tools:
             node_id = f"{sample.file_path}::{sample.function_name}"
@@ -76,6 +87,7 @@ class ReActAgent:
                 tool_history=tool_history,
                 start_line=sample.start_line or 0,
                 end_line=sample.end_line or 0,
+                route_context=route_context,
             )
 
             state.reasoning_trace.append(f"step_{step+1}: {react_step.reasoning}")
@@ -133,6 +145,7 @@ class ReActAgent:
             tool_history=tool_history,
             start_line=sample.start_line or 0,
             end_line=sample.end_line or 0,
+            route_context=route_context,
         )
         usage_total = usage_total + react_step.token_usage
         report = react_step.report or _make_timeout_report(sample)
@@ -223,6 +236,15 @@ class ReActAgent:
                         f"is_taint_sink: {info.get('is_taint_sink', False)}"
                     )
                 return f"No node info for '{fn}'."
+
+            elif tool_name == "get_route_context":
+                regs = self.tools.get_route_context(fn)
+                if not regs:
+                    return (
+                        f"No HTTP route registration found for '{fn}'. That means it "
+                        "could not be established, NOT that the function is unguarded."
+                    )
+                return format_route_block(regs, fn)
 
             elif tool_name == "get_taint_path":
                 paths = self.tools.get_taint_path(fn)

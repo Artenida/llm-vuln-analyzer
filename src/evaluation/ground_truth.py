@@ -85,3 +85,89 @@ def load_ground_truth(path: str | Path) -> GroundTruthDataset:
         entries=entries,
         curation_status=data.get("curation_status", {}) or {},
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Summary block
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# A ground truth file carries a hand-written `summary`. Nothing in `evaluate`
+# reads it - metrics come from `functions[]` - but it is the block that gets
+# quoted into a write-up, and it drifts: juice-shop's still read
+# `vulnerable: 47` against 55 actual rows months after the verification pass
+# added eight, and had no CWE-345 entry at all.
+#
+# These live here rather than in experiments/scripts so they are tracked, tested,
+# and importable. `experiments/` is gitignored, so a test importing from there
+# would pass locally and fail on a fresh clone.
+
+
+def summary_vuln_id(entry: dict) -> str:
+    """Mirrors GroundTruthEntry.vuln_id for a raw row dict."""
+    if entry.get("duplicate_of"):
+        return entry["duplicate_of"]
+    lines = entry.get("source_lines") or []
+    base = f"{entry.get('file')}::{entry.get('function_name')}"
+    return f"{base}@{lines[0]}-{lines[-1]}" if lines else base
+
+
+def compute_summary(functions: list) -> dict:
+    """Every summary field derivable from the rows, whether or not a given
+    dataset happens to use it."""
+    from collections import Counter
+
+    vuln = [e for e in functions if e.get("vulnerable")]
+    clean = [e for e in functions if not e.get("vulnerable")]
+
+    # A row counts as verified-clean if someone read it and recorded a clean
+    # verdict. The ctf_integrity rows carry VERIFIED_CLEAN_OUT_OF_SCOPE_CTF -
+    # read and verified, then scope-tagged - so a prefix match is the right
+    # test; an exact one would report them as never read.
+    verified_clean = [
+        e for e in clean
+        if str(e.get("verification_status") or "").startswith("VERIFIED_CLEAN")
+    ]
+
+    cwe_counts = dict(sorted(Counter(e.get("cwe_id") for e in vuln if e.get("cwe_id")).items()))
+    sev_counts = Counter(e.get("severity") for e in vuln if e.get("severity"))
+
+    return {
+        "total_functions": len(functions),
+        "total_functions_ground_truthed": len(functions),
+        "vulnerable": len(vuln),
+        "clean": len(clean),
+        "vulnerable_in_scope": sum(1 for e in vuln if e.get("taxonomy_scope") == "in_scope"),
+        "vulnerable_out_of_scope": sum(1 for e in vuln if e.get("taxonomy_scope") == "out_of_scope"),
+        "clean_verified": len(verified_clean),
+        "clean_or_not_applicable": len(clean),
+        "unique_cwe_instances": len({summary_vuln_id(e) for e in vuln}),
+        "duplicate_findings": sum(1 for e in vuln if e.get("duplicate_of")),
+        "by_cwe": cwe_counts,
+        "cwe_distribution": cwe_counts,
+        "severity_distribution": {
+            "high": sev_counts.get("high", 0),
+            "medium": sev_counts.get("medium", 0),
+            "low": sev_counts.get("low", 0),
+        },
+    }
+
+
+def recompute_present_keys(stored: dict, functions: list) -> tuple:
+    """Returns (updated summary, keys left untouched because they are not derivable).
+
+    Only keys already in the file are recomputed. Datasets do not share a summary
+    schema - juice-shop has `by_cwe`, auth-service has `cwe_distribution`, nodegoat
+    has its own names again - so writing the full computed set would silently
+    impose one dataset's schema on the others. Key order is preserved so applying
+    the result produces a minimal diff.
+    """
+    computed = compute_summary(functions)
+    updated: dict = {}
+    unknown: list = []
+    for key, value in stored.items():
+        if key in computed:
+            updated[key] = computed[key]
+        else:
+            updated[key] = value
+            unknown.append(key)
+    return updated, unknown

@@ -15,6 +15,7 @@ from typing import Any, Optional
 import openai
 
 from src.config import LLMConfig
+from src.context.route_context import format_route_block
 from src.llm.cost_ledger import CostLedger
 from src.llm.pricing import TokenUsage, estimate_cost, extract_usage
 from src.models import CodeSample
@@ -115,6 +116,10 @@ Available tools:
   get_callers(function_name)    — returns list of functions that call this function
   get_source(function_name)     — returns source code of a specific function
   is_entry_point(function_name) — returns true if this is an HTTP handler / route
+  get_route_context(function_name) — returns the HTTP routes this function is registered
+                                   on and the middleware chain that runs before it.
+                                   The target's own route context is already in the
+                                   state below; use this tool for OTHER functions.
   get_taint_path(function_name) — traces user-controlled data from HTTP entry points
                                    through this function to dangerous sinks (SQL, shell, etc.)
                                    Use this when you suspect an injection or flow-based vuln
@@ -127,6 +132,16 @@ Rules:
   to inspect the callee and attribute findings to the correct function.
 - Do NOT flag a controller that only delegates — verify with get_callers if needed.
 - A config.X reference is NOT a hardcoded secret — it reads from configuration.
+- Read the ROUTE CONTEXT block before reporting any missing check. Middleware
+  listed there as running BEFORE the target has already done whatever it does —
+  including overwriting fields on the request object. A check performed by a
+  guard is not missing from the target. If a guard's name is not enough to tell
+  you what it enforces, call get_source on it; authentication ("is anyone logged
+  in") is not authorization ("may THIS user touch THIS record"), and only the
+  guard's code settles which one it is.
+- "No route registration was found" means unknown, NOT unguarded. If you cannot
+  establish how a function is reached, say so in the explanation and lower your
+  confidence rather than assuming the worst case.
 - Emit "final" as soon as you have enough evidence. Max steps is enforced externally.
 - Respond ONLY with valid JSON matching Option A or Option B. No markdown.
 
@@ -234,6 +249,8 @@ Lines: {start_line}–{end_line}
 {code}
 ```
 
+{route_context}
+
 === TOOL HISTORY ===
 {tool_history}
 
@@ -326,10 +343,17 @@ class LLMClient:
         start_line: int = 0,
         end_line: int = 0,
         phase: str = "react_loop",
+        route_context: Optional[list[dict]] = None,
     ) -> ReActStep:
         """
         One ReAct reasoning step. Returns either a tool call or a final report.
         tool_history is a list of {"tool": ..., "args": ..., "result": ...} dicts.
+
+        route_context is the function's HTTP registrations (ToolSet.get_route_context).
+        It is rendered into the state every turn rather than left for the agent to
+        request, because the agent cannot ask for context it does not know exists —
+        and a handler with no visible guards is precisely the case it reads as
+        "unguarded" instead of "unknown".
         """
         history_text = _format_tool_history(tool_history)
 
@@ -340,6 +364,7 @@ class LLMClient:
             end_line=end_line or sample.end_line or "?",
             language=sample.language.value,
             code=sample.code,
+            route_context=format_route_block(route_context or [], sample.function_name),
             tool_history=history_text or "(none yet)",
         )
 

@@ -392,3 +392,131 @@ class TestBillingServiceExtraction:
             pytest.skip("billing_service.js not found")
         samples = self.extractor.from_path(self.billing_path)
         assert len(samples) == 6
+
+# ── route extraction ──────────────────────────────────────────────────────────
+
+from src.ingestion.route_extractor import RouteExtractor  # noqa: E402
+
+
+EXPRESS_CODE = '''\
+function configureApp (app) {
+  app.use(compression())
+  app.use('/rest/basket/:id', security.isAuthorized())
+  app.get('/api/Addresss', security.appendUserId(), utils.asyncHandler(address.getAddress()))
+  app.delete('/api/Addresss/:id', security.appendUserId(), utils.asyncHandler(address.delAddressById()))
+  app.post('/file-upload', ensureFileIsPassed, checkFileType, handleXmlUpload)
+  app.get(['/.well-known/security.txt', '/security.txt'], verify.accessControlChallenges())
+  app.use('/api/Quantitys/:id', security.isAccounting(), IpFilter(['123.456.789'], { mode: 'allow' }))
+  app.use((req, res, next) => { next() })
+  router.get('/legacy', legacyHandler)
+  swaggerUi.serve(somethingElse)
+  helmet.frameguard()
+}
+'''
+
+
+class TestRouteExtraction:
+
+    def setup_method(self):
+        self.rx = RouteExtractor()
+        self.routes = self.rx.extract(EXPRESS_CODE, "typescript")
+
+    def _by_path(self, path, method=None):
+        return [
+            r for r in self.routes
+            if r.path == path and (method is None or r.method == method)
+        ]
+
+    def test_extracts_app_registrations_not_just_router(self):
+        """The old regex only matched `router.` — juice-shop registers 171
+        routes as `app.`, so the route table came out empty."""
+        methods = {(r.method, r.path) for r in self.routes}
+        assert ("GET", "/api/Addresss") in methods
+        assert ("GET", "/legacy") in methods
+
+    def test_handler_order_is_preserved(self):
+        """Order is the point: a guard registered before a handler has already
+        run by the time the handler sees the request."""
+        route = self._by_path("/api/Addresss", "GET")[0]
+        assert route.handlers == [
+            "security.appendUserId()",
+            "utils.asyncHandler(address.getAddress())",
+        ]
+        assert route.middleware == ["security.appendUserId()"]
+
+    def test_wrapped_handler_name_is_recovered(self):
+        """`utils.asyncHandler(address.getAddress())` must resolve to getAddress,
+        or the registration can never be matched to the function it invokes."""
+        route = self._by_path("/api/Addresss", "GET")[0]
+        assert route.handler_names == ["appendUserId", "asyncHandler", "getAddress"]
+
+    def test_receiver_is_not_mistaken_for_a_handler(self):
+        """`address` in `address.getAddress()` is a module object, not a handler."""
+        route = self._by_path("/api/Addresss", "GET")[0]
+        assert "address" not in route.handler_names
+        assert "security" not in route.handler_names
+        assert "utils" not in route.handler_names
+
+    def test_comma_inside_an_argument_does_not_split_a_handler(self):
+        """The old `args.split(',')` broke on any comma inside a call argument."""
+        route = self._by_path("/api/Quantitys/:id", "USE")[0]
+        assert route.handlers == [
+            "security.isAccounting()",
+            "IpFilter(['123.456.789'], { mode: 'allow' })",
+        ]
+
+    def test_bare_identifier_handlers(self):
+        route = self._by_path("/file-upload", "POST")[0]
+        assert route.handlers == ["ensureFileIsPassed", "checkFileType", "handleXmlUpload"]
+        assert route.handler_names == ["ensureFileIsPassed", "checkFileType", "handleXmlUpload"]
+
+    def test_prefix_guard_detection(self):
+        guard = self._by_path("/rest/basket/:id", "USE")[0]
+        assert guard.is_prefix_guard
+        assert guard.middleware == ["security.isAuthorized()"]
+
+        endpoint = self._by_path("/api/Addresss", "GET")[0]
+        assert not endpoint.is_prefix_guard
+
+    def test_global_middleware_has_no_path(self):
+        globals_ = [r for r in self.routes if r.method == "USE" and not r.path]
+        raws = [h for r in globals_ for h in r.handlers]
+        assert "compression()" in raws
+        # A registration with no mount path guards everything, so it is not a
+        # prefix guard and must not be reported as one.
+        assert all(not r.is_prefix_guard for r in globals_)
+
+    def test_array_of_paths(self):
+        route = [r for r in self.routes if "security.txt" in r.path][0]
+        assert route.path == "/.well-known/security.txt, /security.txt"
+        assert route.handler_names == ["accessControlChallenges"]
+
+    def test_inline_middleware_is_collapsed_but_kept(self):
+        """An anonymous arrow occupies a position in the chain; keeping it keeps
+        the positions honest, collapsing it keeps it out of the prompt."""
+        inline = [r for r in self.routes if "<inline middleware>" in r.handlers]
+        assert len(inline) == 1
+
+    def test_non_router_objects_are_ignored(self):
+        objects_seen = {r.path for r in self.routes}
+        assert not any("somethingElse" in p for p in objects_seen)
+        raws = [h for r in self.routes for h in r.handlers]
+        assert "somethingElse" not in raws
+
+    def test_source_line_recorded(self):
+        route = self._by_path("/api/Addresss", "GET")[0]
+        assert EXPRESS_CODE.splitlines()[route.source_line - 1].strip().startswith(
+            "app.get('/api/Addresss'"
+        )
+
+    def test_non_js_language_yields_nothing(self):
+        assert self.rx.extract(EXPRESS_CODE, "c") == []
+
+    def test_routes_survive_an_oversized_enclosing_function(self):
+        """The whole point of Stage 1: juice-shop's route table lives inside a
+        514-line function that the extractor skips, so routes must come from raw
+        content rather than from extracted function bodies."""
+        extractor = CodeExtractor(max_function_lines=2)
+        samples = extractor.from_snippet(EXPRESS_CODE, Language.TYPESCRIPT)
+        assert samples == [] or all(s.function_name != "configureApp" for s in samples)
+        assert len(extractor.all_routes) >= 8
