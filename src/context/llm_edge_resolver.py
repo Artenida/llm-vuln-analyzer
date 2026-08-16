@@ -177,19 +177,24 @@ class LLMEdgeResolver:
             resolved_by  - "cache" | "llm" | "static"
             reasoning    - short explanation string
         """
-        # ── fast path: single candidate, no LLM needed ────────────────────────
-        if len(candidates) == 1:
+        simple_name = raw_call.split(".")[-1] if "." in raw_call else raw_call
+
+        # ── fast path: single candidate that matches the called name ──────────
+        # The name check is not optional. Candidates used to be the whole
+        # project, so a list of one never happened; now that they are narrowed
+        # to an imported module's exports, a module with one function would
+        # otherwise capture every unrelated call made through its alias.
+        if len(candidates) == 1 and candidates[0].lower() == simple_name.lower():
             return {
                 "target": candidates[0],
                 "confidence": 1.0,
                 "resolved_by": "static",
-                "reasoning": "Only one candidate.",
+                "reasoning": "Only candidate, and its name matches the call.",
             }
 
         # ── filter candidates: skip obviously external calls ──────────────────
         # Member expressions like res.json, jwt.sign are external — don't waste
         # tokens asking the LLM about them.
-        simple = raw_call.split(".")[-1] if "." in raw_call else raw_call
         obj = raw_call.split(".")[0] if "." in raw_call else ""
 
         _EXTERNAL_OBJECTS = {
@@ -205,10 +210,15 @@ class LLMEdgeResolver:
             }
 
         # ── cache lookup ──────────────────────────────────────────────────────
-        # Sort candidates so key is stable regardless of insertion order
+        # Keyed on the question, not on who asked it. `caller` used to be part
+        # of the key, so the same call expression made from forty functions was
+        # forty paid answers to one question. The candidate list is still in the
+        # key because it *is* the question — but it is now the handful of names
+        # narrowed for this call, not the project's entire name list, which
+        # meant every key changed whenever any function was added or removed,
+        # orphaning the whole cache. Sorted so order never forks a key.
         cache_key = json.dumps(
             {
-                "caller": caller,
                 "raw_call": raw_call,
                 "candidates": sorted(candidates),
             },

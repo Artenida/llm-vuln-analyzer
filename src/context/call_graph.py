@@ -1,5 +1,7 @@
+import difflib
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from src.models import CodeSample
@@ -78,6 +80,65 @@ class CallGraphBuilder:
             cost_ledger=cost_ledger, run_id=run_id, dataset=dataset,
             offline=offline_edges, budget_usd=budget_usd,
         ) if api_key else None
+
+    # How many names one unresolved call may be asked about. A list this long
+    # is already generous: the answer is either a near-miss of the called name
+    # or something the caller imported, and neither produces twenty options.
+    MAX_LLM_CANDIDATES = 20
+
+    def _llm_candidates(
+        self,
+        sample: CodeSample,
+        raw_call: str,
+        known: Set[str],
+        names_by_file: Dict[str, Set[str]],
+    ) -> List[str]:
+        """The names worth paying to choose between, for one unresolved call.
+
+        Every call used to be sent `list(known)` — the whole project's function
+        names. On Juice Shop that is 1728 names, ~10k tokens, 88% of the prompt,
+        repeated on every call, while the caller's own code was capped at 1500
+        characters. It was also mostly pointless: this path is only reached once
+        static resolution has established that no name matches the call, so the
+        honest answer was usually "external", and 4096 of 4513 cached verdicts
+        were exactly that.
+
+        An empty result means "nothing here could plausibly be the target" —
+        the caller should record an external node rather than buy that answer.
+        """
+        simple = raw_call.split(".")[-1] if "." in raw_call else raw_call
+        obj = raw_call.split(".")[0] if "." in raw_call else ""
+
+        candidates: Set[str] = set()
+
+        # What the alias actually refers to. SymbolResolver has already tried
+        # the exact `alias.method` match; this is the wider net for the case it
+        # misses — a re-exported or renamed function in the imported module.
+        if obj:
+            for imp in sample.imports or []:
+                if imp.alias != obj:
+                    continue
+                stem = Path(imp.source).stem
+                if not stem:
+                    continue
+                for file_path, names in names_by_file.items():
+                    if stem in file_path:
+                        candidates |= names
+
+        # `this.helper()` / `self.helper()`: the target is a sibling in the same
+        # file. Restricted to those receivers — pulling in every same-file name
+        # for an arbitrary `foo.bar()` would just re-inflate the prompt.
+        if obj in ("this", "self"):
+            candidates |= names_by_file.get(sample.file_path or "", set())
+
+        # Near-misses. A renamed import or a one-character difference is the
+        # case static matching cannot settle and a model genuinely can.
+        candidates |= set(difflib.get_close_matches(simple, known, n=5, cutoff=0.8))
+
+        # A function is not its own callee via an alias.
+        candidates.discard(sample.function_name)
+
+        return sorted(candidates)[: self.MAX_LLM_CANDIDATES]
 
     def get_offline_misses(self) -> int:
         """Edges left unresolved because edge resolution was offline (dry run).
@@ -263,6 +324,9 @@ class CallGraphBuilder:
         name_index: Dict[str, Set[str]] = {}
 
         known: Set[str] = set()
+        # file_path -> names defined in it, for narrowing LLM candidates to the
+        # module an alias actually points at.
+        names_by_file: Dict[str, Set[str]] = {}
 
         # ─────────────────────────────────────────────
         # 1. NODE CREATION
@@ -283,6 +347,7 @@ class CallGraphBuilder:
             node_id = self._make_id(s.file_path or "", s.function_name)
 
             known.add(s.function_name)
+            names_by_file.setdefault(s.file_path or "", set()).add(s.function_name)
 
             graph[node_id] = CallGraphNode(
                 id=node_id,
@@ -377,12 +442,22 @@ class CallGraphBuilder:
                 # HYBRID: AI fallback when static fails
                 # ─────────────────────────────────────
                 if resolved_name is None and self.llm_resolver and known:
+                    # Narrowed to what could actually be the target. No
+                    # plausible candidate means the call leaves the codebase —
+                    # recorded as external without paying to be told so.
+                    llm_candidates = self._llm_candidates(
+                        s, c, known, names_by_file
+                    )
                     try:
-                        result = self.llm_resolver.resolve(
-                            caller=src_id,
-                            raw_call=c,
-                            caller_code=s.code,
-                            candidates=list(known),
+                        result = (
+                            self.llm_resolver.resolve(
+                                caller=src_id,
+                                raw_call=c,
+                                caller_code=s.code,
+                                candidates=llm_candidates,
+                            )
+                            if llm_candidates
+                            else {"target": None}
                         )
                         ai_target = result.get("target")
                         if ai_target and ai_target in known:
