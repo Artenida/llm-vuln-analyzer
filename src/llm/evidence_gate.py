@@ -36,6 +36,12 @@ from typing import Optional
 # (CWE-639/862/347/798/...): those are properties of the code in front of you,
 # not of a data flow, and demanding a taint path for them would suppress the
 # findings this tool is best at.
+#
+# Every entry must also appear in `taxonomy.CWE_TAXONOMY_PROMPT`: demanding a
+# declared source for a class the prompt never offered scores the model against
+# a rule it was not given. CWE-22, CWE-611 and CWE-918 sat here in exactly that
+# state until 2026-08-27. `tests/test_taxonomy_consistency.py` now asserts the
+# containment so the two files cannot drift apart again unnoticed.
 FLOW_CWES = frozenset({
     "CWE-89",    # SQL/NoSQL injection
     "CWE-79",    # XSS
@@ -44,6 +50,8 @@ FLOW_CWES = frozenset({
     "CWE-22",    # path traversal
     "CWE-918",   # SSRF
     "CWE-611",   # XXE
+    "CWE-601",   # open redirect — a user-controlled URL reaching a redirect sink
+    "CWE-1427",  # prompt injection — user text reaching a model prompt
 })
 
 # The model is asked to emit a line of the form `SOURCE: <where it enters>`.
@@ -60,7 +68,7 @@ NOT_APPLICABLE = "not_applicable"
 
 
 EVIDENCE_GATE_PROMPT = """\
-EVIDENCE GATE — flow-dependent CWEs (89, 79, 95, 117, 22, 918, 611)
+EVIDENCE GATE — flow-dependent CWEs (89, 79, 95, 117, 22, 918, 611, 601, 1427)
 These describe untrusted data reaching a dangerous sink. They require a SOURCE,
 not just a sink. Before reporting one you MUST be able to name the source, and
 it must be one of:

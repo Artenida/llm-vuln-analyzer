@@ -1280,9 +1280,48 @@ def evaluate(
         typer.echo(f"Mode      : {report.analysis_mode or '?'}")
         typer.echo(f"Dataset   : {report.dataset}")
         typer.echo(f"\nInstance-level detection (TP={m.tp} FP={m.fp} FN={m.fn} TN={m.tn}):")
-        typer.echo(f"  Precision : {m.precision:.3f}")
-        typer.echo(f"  Recall    : {m.recall:.3f}")
-        typer.echo(f"  F1        : {m.f1:.3f}")
+        # Each point estimate is printed with its 95% band. A precision quoted
+        # bare invites a comparison the row counts may not support — Semgrep's
+        # 0.900 on this dataset rests on ten flagged rows and spans 0.60 to 0.98.
+        md = m.to_dict()
+
+        def _band(iv):
+            return f"   [95% CI {iv['low']:.3f}-{iv['high']:.3f}, n={iv['n']}]" if iv else ""
+
+        boot = report.metric_intervals()
+        f1_band = (
+            f"   [95% CI {boot['f1']['low']:.3f}-{boot['f1']['high']:.3f}, bootstrap]"
+            if boot else ""
+        )
+        typer.echo(f"  Precision : {m.precision:.3f}{_band(md['precision_interval'])}")
+        typer.echo(f"  Recall    : {m.recall:.3f}{_band(md['recall_interval'])}")
+        typer.echo(f"  F1        : {m.f1:.3f}{f1_band}")
+
+        lu = report.label_uncertainty()
+        if lu:
+            typer.echo(
+                f"  {lu['disputed_rows']} ground truth rows are undecided; "
+                f"counting them vulnerable instead of clean gives "
+                f"P {lu['optimistic']['precision']:.3f} "
+                f"R {lu['optimistic']['recall']:.3f} "
+                f"F1 {lu['optimistic']['f1']:.3f}"
+            )
+        tiers = report.recall_by_evidence_tier()
+        if tiers and len(tiers) > 1:
+            typer.echo("  Recall by how the label was established:")
+            for tier, row in sorted(tiers.items()):
+                typer.echo(f"    {tier:<24} {row['detected']}/{row['total']}   {row['recall']:.3f}")
+
+        tc = report.taxonomy_coverage(gt)
+        if tc["ground_truth_cwes_not_offered"]:
+            typer.echo(
+                f"  WARNING: {tc['rows_labelled_with_an_unoffered_cwe']} vulnerable rows "
+                f"are labelled with CWEs the prompt never offers "
+                f"({', '.join(tc['ground_truth_cwes_not_offered'])}); "
+                f"{tc['of_which_missed']} of them were missed. Recall ceiling if all "
+                f"were recovered: {tc['recall_ceiling_if_all_recovered']}"
+            )
+
         typer.echo(f"  CWE accuracy (on TPs) : {report.cwe_accuracy():.3f}")
         typer.echo(f"  Hallucination rate (on flagged) : {report.hallucination_rate():.3f}")
         # Printed right under the headline so the two are always read together —
@@ -1649,6 +1688,155 @@ def ui(
         # not fatal — running_instance() discards one whose process is gone —
         # but clearing it keeps the next start from having to work that out.
         instance_lock.release()
+
+
+@app.command()
+def groundedness(
+    run_dir: str = typer.Option(
+        ..., "--run", "-r",
+        help="A completed run directory containing analysis.json, extraction.json "
+             "and call_graph.json."
+    ),
+    evaluation: Optional[str] = typer.Option(
+        None, "--evaluation", "-e",
+        help="Optional evaluation JSON for the same run. Adds the cross-tabulation "
+             "of groundedness against scored outcomes — the only part of this "
+             "command that needs a ground truth."
+    ),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o", help="Write the full per-finding report to this path."
+    ),
+    recheck_patches: bool = typer.Option(
+        False, "--recheck-patches",
+        help="Re-analyse each validated patch to see whether the finding survives it. "
+             "COSTS MONEY: one model call per patched function. Off by default; "
+             "every other check in this command is free."
+    ),
+    max_rechecks: int = typer.Option(
+        20, "--max-rechecks",
+        help="Cap on re-analysis calls when --recheck-patches is passed. Findings "
+             "beyond the cap are reported as skipped, not dropped."
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip the spend confirmation."),
+):
+    """
+    Score a run's findings against the program rather than against an answer key.
+
+    Checks that each finding's lines fall inside its function, that line numbers
+    cited in the explanation exist, that a flow CWE is reported on code some
+    taint source can reach, that the CWE was one the prompt offered, and that
+    identifiers quoted in the explanation appear in the code. Needs no ground
+    truth and makes no model calls, so it runs on any codebase and costs nothing.
+    """
+    from src.evaluation.groundedness import cross_tabulate, score_findings
+
+    base = Path(run_dir)
+    missing = [f for f in ("analysis.json", "extraction.json", "call_graph.json")
+               if not (base / f).exists()]
+    if missing:
+        typer.echo(f"Missing in {base}: {', '.join(missing)}", err=True)
+        raise typer.Exit(1)
+
+    def _load(name):
+        return json.loads((base / name).read_text(encoding="utf-8"))
+
+    # The patch check scores whatever `patch` already produced for this run. No
+    # patches file simply means that check reports not-applicable throughout —
+    # nothing here generates one, because generating patches costs money.
+    patches = None
+    found = sorted(base.glob("*_patches.json"))
+    if found:
+        patches = json.loads(found[0].read_text(encoding="utf-8"))
+        typer.echo(f"Scoring patches from {found[0].name}")
+
+    report = score_findings(_load("analysis.json"), _load("extraction.json"),
+                            _load("call_graph.json"), patches=patches)
+
+    typer.echo(f"\n{'-' * 60}")
+    typer.echo(f"Findings scored : {report['findings_scored']}")
+    typer.echo(f"Fully grounded  : {report['grounded']}  ({report['groundedness_rate']})")
+    typer.echo(f"Ungrounded      : {report['ungrounded']}")
+    typer.echo("\nPer check (pass / fail / not applicable):")
+    for name, row in report["per_check"].items():
+        rate = "-" if row["pass_rate"] is None else f"{row['pass_rate']:.3f}"
+        typer.echo(f"  {name:<18} {row['pass']:>4} / {row['fail']:>4} / "
+                   f"{row['not_applicable']:>4}   pass rate {rate}")
+
+    if evaluation:
+        ev = json.loads(Path(evaluation).read_text(encoding="utf-8"))
+        x = cross_tabulate(report, ev)
+        typer.echo("\nAgainst the scored outcomes:")
+        for bucket in ("grounded", "ungrounded"):
+            counts = x["table"][bucket]
+            p = x[f"{bucket}_precision"]
+            typer.echo(f"  {bucket:<12} TP={counts['TP']:<4} FP={counts['FP']:<4} "
+                       f"precision {'-' if p is None else f'{p:.3f}'}")
+        typer.echo(f"  {x['findings_not_in_ground_truth']} findings lie outside the "
+                   f"ground truth's rows and are excluded from the table.")
+        report["cross_tabulation"] = x
+
+    if recheck_patches:
+        report["patch_recheck"] = _recheck_patches(report, patches, max_rechecks, yes)
+
+    if output:
+        Path(output).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        typer.echo(f"\nFull report -> {output}")
+
+
+def _recheck_patches(report: dict, patches: Optional[dict], limit: int, yes: bool) -> dict:
+    """C6 — re-analyse each validated patch. The one paid part of `groundedness`.
+
+    Kept in its own function, and behind its own confirmation, so that the
+    default path of this command cannot spend anything: every other check reads
+    files that already exist.
+    """
+    from src.evaluation.patch_recheck import recheck_run
+    from src.models.code_sample import CodeSample, Language
+
+    candidates = sum(
+        1 for row in (patches or {}).get("patches", []) if row.get("patch_valid") is True
+    )
+    billable = min(candidates, limit)
+    if not billable:
+        typer.echo("\nNo validated patches to re-check.")
+        return {"calls_made": 0, "counts": {}, "resolution_rate": None, "rows": []}
+
+    typer.echo(f"\n--recheck-patches will make up to {billable} model calls "
+               f"({candidates} validated patches, cap {limit}).")
+    if not yes and not typer.confirm("Proceed?", default=False):
+        typer.echo("Skipped — no calls made.")
+        return {"calls_made": 0, "counts": {}, "resolution_rate": None, "rows": []}
+
+    config = load_config(None)
+    resolved_key, key_alias = config.resolve_api_key(None)
+    client = LLMClient(config.llm, api_key=resolved_key, api_key_alias=key_alias)
+
+    def analyze(patched_code: str, finding: dict) -> dict:
+        # No context prompt: the question is whether the patched function still
+        # reads as vulnerable on its own terms, and re-injecting the call graph
+        # would let a neighbour's defect keep the verdict alive.
+        sample = CodeSample(
+            function_name=finding.get("function_name") or "patched",
+            file_path=finding.get("file_path") or "",
+            code=patched_code,
+            language=Language(finding.get("language") or "typescript"),
+            start_line=1,
+            end_line=max(1, patched_code.count("\n") + 1),
+        )
+        result = client.analyze(sample, phase="patch_recheck")
+        return {"vulnerability_found": result.vulnerability_found, "cwe_id": result.cwe_id}
+
+    out = recheck_run(report, patches or {}, analyze, limit=limit)
+    counts = out["counts"]
+    typer.echo(f"\nPatch re-check ({out['calls_made']} calls):")
+    typer.echo(f"  resolved   {counts.get('resolved', 0)}   (finding gone after the patch)")
+    typer.echo(f"  unresolved {counts.get('unresolved', 0)}   (same CWE still reported)")
+    typer.echo(f"  displaced  {counts.get('displaced', 0)}   (a different CWE now reported)")
+    typer.echo(f"  skipped    {counts.get('skipped', 0)}")
+    if out["resolution_rate"] is not None:
+        typer.echo(f"  resolution rate {out['resolution_rate']:.3f} over the "
+                   f"{out['calls_made']} re-checked")
+    return out
 
 
 if __name__ == "__main__":

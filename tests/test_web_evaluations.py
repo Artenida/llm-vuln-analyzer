@@ -117,6 +117,15 @@ def test_scoring_a_run_matches_the_evaluator(client):
     assert report["detection_metrics"] == {
         "tp": 1, "fp": 0, "fn": 1, "tn": 1,
         "precision": 1.0, "recall": 0.5, "f1": 0.6667,
+        # A point estimate off one flagged row and two vulnerable rows carries
+        # almost no information, and the bands say so: the API has to serve them
+        # with the estimate, or the UI shows 1.00 precision from a single row.
+        "precision_interval": {
+            "point": 1.0, "low": 0.2065, "high": 1.0, "n": 1, "method": "wilson_95",
+        },
+        "recall_interval": {
+            "point": 0.5, "low": 0.0945, "high": 0.9055, "n": 2, "method": "wilson_95",
+        },
     }
     assert report["run_id"] == ANALYSIS_PAYLOAD["run_id"]
     assert report["cost_per_tp_usd"] == pytest.approx(0.25)

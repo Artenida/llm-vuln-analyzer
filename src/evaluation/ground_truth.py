@@ -20,6 +20,12 @@ class GroundTruthEntry:
     affected_lines: list = field(default_factory=list)
     notes: str = ""
     duplicate_of: Optional[str] = None  # "<file>::<function_name>" of the canonical instance
+    # Evidence tier for this row's label, e.g. VERIFIED_VULNERABLE (read, and in
+    # four cases confirmed by running an exploit), VERIFIED_CLEAN,
+    # BORDERLINE_PENDING_AUTHOR. None on rows never stamped. Carried through to
+    # the evaluation so a metric can be reported per tier rather than only in
+    # aggregate; nothing in the scoring itself branches on it.
+    verification_status: Optional[str] = None
     # [start, end] of the function in the source. Optional: datasets written
     # before this existed have none, and everything falls back to name+file.
     source_lines: list = field(default_factory=list)
@@ -88,6 +94,7 @@ def load_ground_truth(path: str | Path) -> GroundTruthDataset:
             notes=e.get("notes", ""),
             duplicate_of=e.get("duplicate_of"),
             source_lines=e.get("source_lines") or [],
+            verification_status=e.get("verification_status"),
         )
         for e in data.get("functions", [])
     ]

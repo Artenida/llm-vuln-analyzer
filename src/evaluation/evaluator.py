@@ -27,6 +27,12 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from src.evaluation.ground_truth import GroundTruthDataset, GroundTruthEntry, load_ground_truth
+from src.evaluation.intervals import (
+    bootstrap_metrics,
+    evidence_stratified_recall,
+    label_sensitivity,
+    wilson_interval,
+)
 from src.llm import attribution
 
 logger = logging.getLogger(__name__)
@@ -59,6 +65,9 @@ class InstanceVerdict:
     # Set on a clean row whose own false positive turned out to be the same
     # detection that recovered a genuinely vulnerable row elsewhere.
     attribution_neutralized: bool = False
+    # The ground truth row's evidence tier, copied through unchanged. Read only
+    # by src/evaluation/intervals.py; the outcome above never depends on it.
+    verification_status: Optional[str] = None
 
     @property
     def match_basis(self) -> str:
@@ -191,6 +200,7 @@ def _score_instance(gt: GroundTruthEntry, finding: Optional[dict]) -> InstanceVe
         cwe_correct=cwe_correct,
         hallucination_flag=hallucination,
         evidence_gate=gate,
+        verification_status=gt.verification_status,
     )
 
 
@@ -220,6 +230,13 @@ class ConfusionMetrics:
             "precision": round(self.precision, 4),
             "recall": round(self.recall, 4),
             "f1": round(self.f1, 4),
+            # Published beside the point estimates, never instead of them. The
+            # denominators differ: precision is measured over the rows the tool
+            # flagged, recall over the rows the dataset says are vulnerable, so
+            # the two bands are not the same width and should not be quoted as
+            # one figure.
+            "precision_interval": wilson_interval(self.tp, self.tp + self.fp),
+            "recall_interval": wilson_interval(self.tp, self.tp + self.fn),
         }
 
 
@@ -447,6 +464,63 @@ class EvaluationReport:
             return None
         return self.total_cost_usd / tp
 
+    def taxonomy_coverage(self, gt: GroundTruthDataset) -> dict:
+        """Ground truth classes the prompt never offered the model.
+
+        Recall is only meaningful over classes the model was asked about. Eight
+        juice-shop classes were in the answer key and in no prompt until
+        2026-08-27, costing four rows outright, and nothing in the harness said
+        so — the gap surfaced from an unrelated groundedness check. Reported on
+        every run now, for every dataset, because the same drift is invisible
+        again the moment a dataset adds a class.
+        """
+        from src.evaluation.groundedness import taxonomy_cwes
+
+        offered = taxonomy_cwes()
+        rows_by_cwe: dict = {}
+        for i in self.instances:
+            if not i.gt_vulnerable or not i.gt_cwe or i.gt_cwe in offered:
+                continue
+            row = rows_by_cwe.setdefault(i.gt_cwe, {"rows": 0, "detected": 0})
+            row["rows"] += 1
+            if i.outcome == "TP":
+                row["detected"] += 1
+
+        unoffered_rows = sum(r["rows"] for r in rows_by_cwe.values())
+        missed = sum(r["rows"] - r["detected"] for r in rows_by_cwe.values())
+        vulnerable = sum(1 for i in self.instances if i.gt_vulnerable)
+        return {
+            "cwes_offered_by_prompt": len(offered),
+            "ground_truth_cwes_not_offered": sorted(rows_by_cwe),
+            "rows_labelled_with_an_unoffered_cwe": unoffered_rows,
+            "of_which_missed": missed,
+            # What recall would be if every row whose class the model was never
+            # given had been detected. A ceiling, not a prediction.
+            "recall_ceiling_if_all_recovered": (
+                round((sum(1 for i in self.instances if i.outcome == "TP") + missed) / vulnerable, 4)
+                if vulnerable else None
+            ),
+            "per_cwe": rows_by_cwe,
+        }
+
+    def metric_intervals(self) -> dict:
+        """Sampling uncertainty around the headline figures.
+
+        Answers one question only: how much of the gap between two runs, or
+        between this tool and the baseline, could be an artefact of scoring 379
+        particular rows rather than 379 others. It says nothing about whether the
+        labels are right or whether a rerun would agree with this one.
+        """
+        return bootstrap_metrics([i.outcome for i in self.instances])
+
+    def label_uncertainty(self) -> Optional[dict]:
+        """The same run rescored with the undecided ground truth rows flipped."""
+        return label_sensitivity(self.instances)
+
+    def recall_by_evidence_tier(self) -> Optional[dict]:
+        """Recall split by how each vulnerable row's label was established."""
+        return evidence_stratified_recall(self.instances)
+
     def to_dict(self, gt: GroundTruthDataset) -> dict:
         return {
             "schema_version": "1.0",
@@ -457,6 +531,15 @@ class EvaluationReport:
             "source_path": self.source_path,
             "generated_at": datetime.now().isoformat(),
             "detection_metrics": self.detection_metrics().to_dict(),
+            # Three bands, three different questions: sampling noise, unsettled
+            # labels, and which tier of evidence the recall rests on. None of
+            # them covers run-to-run variance, which needs repeated runs.
+            "metric_intervals": self.metric_intervals(),
+            "label_uncertainty": self.label_uncertainty(),
+            "recall_by_evidence_tier": self.recall_by_evidence_tier(),
+            # Empty lists here mean the prompt covers every class the dataset
+            # labels. A non-empty one caps recall before the run even starts.
+            "taxonomy_coverage": self.taxonomy_coverage(gt),
             # Strict is the headline; this is the same run scored with
             # cross-function attribution credited, published beside it so a
             # reader can see exactly how much came from indirect credit.
@@ -489,6 +572,7 @@ class EvaluationReport:
                     "cwe_correct": i.cwe_correct,
                     "hallucination_flag": i.hallucination_flag,
                     "evidence_gate": i.evidence_gate,
+                    "verification_status": i.verification_status,
                     "match_basis": i.match_basis,
                     "attributed_outcome": i.attributed_outcome,
                 }
