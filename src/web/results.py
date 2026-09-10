@@ -120,7 +120,13 @@ def summary(directory: Path) -> dict:
 
         "severity_counts": dict(Counter(f.get("severity") or "unknown" for f in flagged)),
         "cwe_counts": dict(Counter(f["cwe_id"] for f in flagged if f.get("cwe_id"))),
+        # `graph_nodes` counts every node, `external::` stubs for unresolved call
+        # targets included — on juice-shop that is 807 of 1306, so it reads as a
+        # function count more than twice the size of the run. The breakdown is
+        # recomputed from the nodes rather than read from the file so that runs
+        # saved before it was recorded report it too.
         "graph_nodes": (graph or {}).get("total_nodes") or len((graph or {}).get("graph") or {}),
+        **_graph_breakdown(graph),
         "checkpoint_records": len(checkpoint),
 
         "patch_summary": (patch_data or {}).get("summary"),
@@ -129,6 +135,25 @@ def summary(directory: Path) -> dict:
         "artifacts": artifacts(directory),
     }
     return result
+
+
+def _graph_breakdown(graph: Optional[dict]) -> dict:
+    """`graph_project_functions` / `graph_external_stubs`, or empty when absent.
+
+    Deliberately not filled with zeros when there is no graph: a run with no
+    call_graph.json and a run whose graph holds no project functions are
+    different states, and the UI has to be able to tell them apart.
+    """
+    nodes = (graph or {}).get("graph")
+    if not nodes:
+        return {}
+    from src.context.call_graph import graph_counts
+
+    counts = graph_counts(nodes)
+    return {
+        "graph_project_functions": counts["project_functions"],
+        "graph_external_stubs": counts["external_stubs"],
+    }
 
 
 def _dominant_mode(findings: list[dict]) -> Optional[str]:

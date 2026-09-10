@@ -340,12 +340,16 @@ def save_call_graph(
     # fields, so a field added to CallGraphNode reached the in-memory graph and
     # the HTML export but silently vanished from the saved JSON.
     # `route_registrations` was lost that way.
-    from src.context.call_graph import nodes_to_dict
+    from src.context.call_graph import graph_counts, nodes_to_dict
 
+    # `total_nodes` is kept for the runs already on disk that carry it, but it
+    # counts `external::` stubs too — on juice-shop, 807 of 1306. The breakdown
+    # is what a reader needs to tell a coverage figure from a call-target count.
     payload = {
         "source_path": source_path,
         "timestamp":   datetime.now().isoformat(),
         "total_nodes": len(graph),
+        **graph_counts(graph),
         "graph":       nodes_to_dict(graph),
     }
 

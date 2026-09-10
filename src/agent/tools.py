@@ -241,6 +241,10 @@ class ToolSet:
         edge_count      = sum(len(self._node_callees(nid)) for nid in self.graph)
         return {
             "total_nodes":   total,
+            # Nodes that are functions in the analysed project, i.e. `total_nodes`
+            # minus the `external::` stubs stood up for unresolved call targets.
+            # `total_nodes` alone reads as a function count and is not one.
+            "project_functions": total - external,
             "entry_points":  entry_points,
             "taint_sources": taint_sources,
             "taint_sinks":   taint_sinks,

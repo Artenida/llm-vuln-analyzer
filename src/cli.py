@@ -942,6 +942,8 @@ def graph(
         stats = tools_tmp.get_graph_summary()
         typer.echo(
             f"\nGraph summary: {stats['total_nodes']} nodes, {stats['total_edges']} edges\n"
+            f"  Project functions: {stats['project_functions']}"
+            f"  (nodes for functions in the analysed project)\n"
             f"  Entry points : {stats['entry_points']}\n"
             f"  Taint sources: {stats['taint_sources']}\n"
             f"  Taint sinks  : {stats['taint_sinks']}\n"

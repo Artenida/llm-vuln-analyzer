@@ -561,3 +561,39 @@ def nodes_to_dict(graph: Dict[str, "CallGraphNode"]) -> Dict[str, dict]:
             "route_registrations": list(node.route_registrations),
         }
     return result
+
+
+def graph_counts(graph: Dict[str, object]) -> Dict[str, int]:
+    """How many nodes in this graph are functions the run actually analysed.
+
+    `len(graph)` is not that number and never was. A graph node is created for
+    every *call target*, so an unresolved call to a library or runtime function
+    gets an `external::` stub so the edge has somewhere to land. On juice-shop
+    that is 807 of 1306 nodes — the graph reported more than twice the functions
+    the run had analysed, which reads as a coverage claim the run cannot support.
+
+    Accepts either the in-memory `CallGraphNode` form or the plain-dict form
+    saved to call_graph.json, so a run written before this existed can still be
+    counted on read rather than needing a re-run.
+
+    `project_functions` still falls short of the analysed sample count for two
+    reasons the graph cannot represent, both deliberate:
+      - node ids are `<file>::<name>`, so several same-named functions in one
+        file (juice-shop's four `models/user.ts::set` setters) share one node;
+      - chunks of an oversized function are excluded on purpose (see the
+        `chunk_of` skip in `build`), because giving a chunk a node would assert
+        call edges the source does not have.
+    Report it as a graph statistic, not as "functions analysed" — the analysis
+    run's own summary owns that figure.
+    """
+    def _attr(node, name: str) -> bool:
+        if isinstance(node, dict):
+            return bool(node.get(name))
+        return bool(getattr(node, name, False))
+
+    external = sum(1 for n in graph.values() if _attr(n, "is_external"))
+    return {
+        "total_nodes":       len(graph),
+        "project_functions": len(graph) - external,
+        "external_stubs":    external,
+    }

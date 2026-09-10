@@ -106,7 +106,10 @@ function ResultBody({ result, path }: { result: ResultSummary; path: string }) {
     {
       id: "graph",
       label: "Call graph",
-      count: result.graph_nodes || null,
+      // Project functions, not `graph_nodes`: the latter counts `external::`
+      // stubs, so the tab used to advertise more than twice the functions the
+      // run had analysed. Falls back for runs saved before the split existed.
+      count: result.graph_project_functions ?? result.graph_nodes ?? null,
       disabled: !result.has_graph && !result.has_graph_html,
       disabledReason: "No call graph in this run",
     },
@@ -243,8 +246,17 @@ function SummaryTab({ result }: { result: ResultSummary }) {
             <dd>{result.analysis_mode ?? "n/a"}</dd>
             <dt>When</dt>
             <dd>{formatDate(result.timestamp ?? result.modified_at)}</dd>
-            <dt>Graph nodes</dt>
-            <dd>{formatNumber(result.graph_nodes)}</dd>
+            <dt>Graph functions</dt>
+            <dd>
+              {formatNumber(result.graph_project_functions ?? result.graph_nodes)}
+              {result.graph_external_stubs != null && (
+                <span className="dim">
+                  {" "}
+                  + {formatNumber(result.graph_external_stubs)} external stubs ={" "}
+                  {formatNumber(result.graph_nodes)} nodes
+                </span>
+              )}
+            </dd>
           </dl>
         </Card>
 

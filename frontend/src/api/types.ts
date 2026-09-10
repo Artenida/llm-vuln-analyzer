@@ -195,7 +195,12 @@ export interface ResultSummary {
 
   severity_counts: Record<string, number>;
   cwe_counts: Record<string, number>;
+  /** Every node, `external::` stubs for unresolved call targets included. */
   graph_nodes: number;
+  /** Nodes that are functions in the analysed project. Absent when the run has no graph. */
+  graph_project_functions?: number;
+  /** Stub nodes stood up so an unresolved call has somewhere to land. */
+  graph_external_stubs?: number;
   checkpoint_records: number;
 
   patch_summary: PatchTotals | null;
