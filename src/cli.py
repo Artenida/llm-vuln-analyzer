@@ -183,6 +183,14 @@ def analyze(
              "analysis.json, checkpoint.jsonl, graph HTML/DOT) into this directory. "
              "Takes precedence over --run-name/--dataset."
     ),
+    chunk_oversized: Optional[bool] = typer.Option(
+        None, "--chunk-oversized/--no-chunk-oversized",
+        help="Whether a function longer than max_function_lines is analysed as a "
+             "series of chunks or dropped entirely. Omit to use the config file's "
+             "setting. Dropping is what a ground truth built before chunking "
+             "assumed, so --no-chunk-oversized is how a run is made comparable "
+             "to one."
+    ),
     flow_pass: bool = typer.Option(
         False, "--flow-pass",
         help="After the per-function pass, run a second pass over GROUPS of related "
@@ -210,6 +218,11 @@ def analyze(
         raise typer.Exit(1)
 
     config = load_config(config_path)
+    # A flag beats the file, and omitting the flag leaves the file alone: the
+    # config stays the default for everyone who does not ask, and the run that
+    # does ask records the asking in its own argv.
+    if chunk_oversized is not None:
+        config.ingestion.chunk_oversized = chunk_oversized
     resolved_key, key_alias = config.resolve_api_key(api_key_alias)
     ledger = CostLedger()
     run_id = make_run_id(config.llm.model)

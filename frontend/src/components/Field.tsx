@@ -97,17 +97,20 @@ export function Select<T extends string>({
   onChange,
   options,
   id,
+  disabled,
 }: {
   value: T;
   onChange: (value: T) => void;
   options: { value: T; label: string }[];
   id?: string;
+  disabled?: boolean;
 }) {
   return (
     <select
       id={id}
       className="input input--select"
       value={value}
+      disabled={disabled}
       onChange={(event) => onChange(event.target.value as T)}
     >
       {options.map((option) => (

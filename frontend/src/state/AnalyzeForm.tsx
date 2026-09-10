@@ -17,6 +17,25 @@ export type AnalyzeMode = "react" | "semantic";
 export interface AnalyzeFormState {
   sourcePath: string;
   outputDir: string;
+  /**
+   * Absolute path of the config this run is scoped to, or null for the default.
+   *
+   * Persisted with the rest of the form on purpose: the scope is a property of
+   * the project you are working on, not of the sitting. Picking "Juice Shop
+   * server-side" once should survive a refresh, a restart and a navigation —
+   * otherwise every fresh load silently reverts to the whole-tree scope, which
+   * is the expensive one.
+   */
+  configPath: string | null;
+  /**
+   * Whether an oversized function is analysed as chunks or dropped.
+   *
+   * null defers to the selected config. A boolean is an explicit override for
+   * this run — kept separate from the config's own value so that switching
+   * scope does not silently discard a choice, and so the form can show which
+   * of the two is in force.
+   */
+  chunkOversized: boolean | null;
   mode: AnalyzeMode;
   visualize: boolean;
   dryRun: boolean;
@@ -49,6 +68,8 @@ export interface AnalyzeFormState {
 const EMPTY: AnalyzeFormState = {
   sourcePath: "",
   outputDir: "",
+  configPath: null,
+  chunkOversized: null,
   mode: "react",
   visualize: true,
   dryRun: false,

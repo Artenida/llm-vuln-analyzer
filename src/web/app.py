@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.web import paths, settings_store
 from src.web.paths import UnsafePathError
-from src.web.routers import cost, evaluations, fs, jobs, results, settings
+from src.web.routers import configs, cost, evaluations, fs, jobs, results, settings
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def create_app() -> FastAPI:
             "api_key": settings_store.api_key_status(),
         }
 
-    for module in (settings, fs, jobs, results, cost, evaluations):
+    for module in (settings, configs, fs, jobs, results, cost, evaluations):
         app.include_router(module.router, prefix="/api")
 
     # vis-network and pyvis's helpers, vendored in the repo. The call-graph HTML

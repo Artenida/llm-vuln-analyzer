@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from src.web import jobs as job_module
 from src.web import paths, settings_store
 from src.web.jobs import ArgumentError, manager
+from src.web.routers import configs as configs_router
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ class AnalyzeRequest(BaseModel):
     dry_run: bool = False
     resume: bool = False
     config_path: Optional[str] = None
+    # None = whatever the chosen config says.
+    chunk_oversized: Optional[bool] = None
     budget_usd: Optional[float] = None
     api_key_alias: Optional[str] = None
     label: Optional[str] = None
@@ -91,6 +94,15 @@ def start_analyze(request: AnalyzeRequest) -> dict:
     except paths.UnsafePathError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Resolved through the same helper `/fs/inspect` uses, and passed on even
+    # when the request named none. An explicit `--config` costs nothing and puts
+    # the scope in `job.command`, where the progress panel shows it — a run
+    # whose scope is implicit is a run nobody can check afterwards.
+    try:
+        config_file = configs_router.resolve(request.config_path)
+    except paths.UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     try:
         argv = job_module.build_analyze_argv(
             source_path=request.source_path,
@@ -99,7 +111,8 @@ def start_analyze(request: AnalyzeRequest) -> dict:
             visualize=request.visualize,
             dry_run=request.dry_run,
             resume=request.resume,
-            config_path=request.config_path,
+            config_path=str(config_file),
+            chunk_oversized=request.chunk_oversized,
             budget_usd=request.budget_usd,
             api_key_alias=alias,
         )

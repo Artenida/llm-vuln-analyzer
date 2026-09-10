@@ -28,6 +28,23 @@
   border-radius: var(--r-md);
 }
 
+/* A count taken under a scope that is no longer selected. Dimmed rather than
+   hidden: the numbers are still the last true ones, they just no longer answer
+   the question the form is now asking. */
+.analyze__inspect--stale {
+  opacity: 0.55;
+}
+
+.analyze__excluded {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border-soft);
+  font-size: var(--fs-xs);
+}
+
 .analyze__note {
   margin: var(--s3) 0 0;
   font-size: var(--fs-xs);

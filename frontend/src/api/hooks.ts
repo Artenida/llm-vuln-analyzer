@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
 import type {
+  AnalysisConfig,
   AppliedPatch,
   AppliedPatches,
   CostEstimate,
@@ -100,9 +101,29 @@ export function useDirListing(path: string | null) {
   });
 }
 
+/**
+ * The analysis configs a run can be scoped to.
+ *
+ * Static on disk, so it is fetched once and kept — the picker must not flicker
+ * empty while a re-scan is in flight.
+ */
+export function useConfigs() {
+  return useQuery({
+    queryKey: ["configs"],
+    queryFn: () => api.get<AnalysisConfig[]>("/configs"),
+    staleTime: Infinity,
+  });
+}
+
 export function useInspect() {
   return useMutation({
-    mutationFn: (path: string) => api.post<InspectResult>("/fs/inspect", { path }),
+    // The config travels with the path: a count means nothing without the scope
+    // it was taken under, so the two are never sent separately.
+    mutationFn: (request: {
+      path: string;
+      config_path?: string | null;
+      chunk_oversized?: boolean | null;
+    }) => api.post<InspectResult>("/fs/inspect", request),
   });
 }
 
@@ -115,6 +136,10 @@ export interface AnalyzeRequest {
   visualize: boolean;
   dry_run: boolean;
   resume: boolean;
+  /** Scope for this run. Must be the config the displayed scan was taken under. */
+  config_path?: string | null;
+  /** null defers to the config; a boolean overrides it for this run only. */
+  chunk_oversized?: boolean | null;
   budget_usd?: number | null;
   api_key_alias?: string;
   label?: string;

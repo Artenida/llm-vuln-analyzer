@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   useActiveJob,
   useCancelJob,
+  useConfigs,
   useEstimate,
   useInspect,
   useJob,
@@ -10,7 +11,7 @@ import {
   useSettings,
   useStartAnalyze,
 } from "@/api/hooks";
-import type { CostEstimate, InspectResult } from "@/api/types";
+import type { AnalysisConfig, CostEstimate, InspectResult } from "@/api/types";
 import {
   Badge,
   Button,
@@ -40,7 +41,7 @@ export function AnalyzePage() {
   // Held above the router so navigating away and back does not clear the form.
   const { form, update, reset } = useAnalyzeForm();
   const {
-    sourcePath, outputDir, mode, visualize, dryRun, resume, budget,
+    sourcePath, outputDir, configPath, chunkOversized, mode, visualize, dryRun, resume, budget,
     inspection, estimate, jobId,
   } = form;
 
@@ -51,6 +52,7 @@ export function AnalyzePage() {
   // `lastResultDir`, so there is nothing here worth persisting.
   const [openPath, setOpenPath] = useState("");
 
+  const { data: availableConfigs } = useConfigs();
   const inspect = useInspect();
   const openResults = useOpenResults();
   const estimateMutation = useEstimate();
@@ -107,9 +109,38 @@ export function AnalyzePage() {
     (k) => k.alias === (settings?.api_key_alias ?? "default") && k.configured,
   );
 
-  async function onInspect(path: string) {
+  // Nothing selected means the default config — the same one a run with no
+  // `--config` gets — so there is always a named scope rather than an implicit
+  // one nobody chose.
+  const selectedConfig =
+    availableConfigs?.find((c) => c.path === configPath) ??
+    availableConfigs?.find((c) => c.is_default) ??
+    null;
+
+  // A scan taken under one scope must never be shown next to a run about to
+  // execute under another: the count on screen is what the cost estimate and
+  // the confirm dialog are built from. When they disagree the scan is stale,
+  // and the page says so instead of quietly pricing the wrong tree.
+  // The toggle's value: an explicit override if one was made, otherwise the
+  // selected config's own setting. Switching scope therefore moves the toggle,
+  // unless you have already overruled it for this run.
+  const effectiveChunking =
+    chunkOversized ?? selectedConfig?.chunk_oversized ?? true;
+
+  const scopeStale =
+    inspection !== null &&
+    selectedConfig !== null &&
+    inspection.config_path !== null &&
+    (inspection.config_path !== selectedConfig.path ||
+      inspection.chunk_oversized !== effectiveChunking);
+
+  async function onInspect(path: string, config: string | null = configPath) {
     update({ estimate: null });
-    const result = await inspect.mutateAsync(path);
+    const result = await inspect.mutateAsync({
+      path,
+      config_path: config,
+      chunk_oversized: effectiveChunking,
+    });
     update({ inspection: result });
     if (result.functions) {
       update({
@@ -120,6 +151,15 @@ export function AnalyzePage() {
       });
     }
   }
+
+  // Changing the scope re-counts rather than leaving the old number on screen.
+  // A scan is a local tree-sitter parse: it costs nothing, and the alternative
+  // is a stale figure sitting under a "Projected cost" heading.
+  useEffect(() => {
+    if (!scopeStale || inspect.isPending || running || !sourcePath.trim()) return;
+    void onInspect(sourcePath, configPath);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeStale, configPath, effectiveChunking]);
 
   // Re-price when the mode changes: agentic costs several calls per function,
   // so a semantic estimate shown next to an agentic run would be badly wrong.
@@ -140,6 +180,8 @@ export function AnalyzePage() {
       visualize,
       dry_run: dryRun,
       resume,
+      config_path: selectedConfig?.path ?? null,
+      chunk_oversized: effectiveChunking,
       budget_usd: dryRun ? null : budget,
     });
     // The server may have auto-named the folder — show where results are going.
@@ -166,6 +208,8 @@ export function AnalyzePage() {
   const canStart =
     sourcePath.trim().length > 0 &&
     !running &&
+    !scopeStale &&
+    !inspect.isPending &&
     (dryRun || keyConfigured) &&
     (inspection === null || inspection.exists);
 
@@ -214,7 +258,50 @@ export function AnalyzePage() {
                 </div>
               </Field>
 
-              {inspection && <InspectionPanel inspection={inspection} />}
+              <Field
+                label="Analysis scope"
+                hint={
+                  selectedConfig
+                    ? selectedConfig.description ||
+                      `${selectedConfig.filename} — ${selectedConfig.skip_dirs.length} excluded paths.`
+                    : "Which files the run opens. Loading…"
+                }
+              >
+                <Select
+                  value={selectedConfig?.path ?? ""}
+                  onChange={(value) => update({ configPath: value || null })}
+                  // Locked while a run is in flight, like every other control
+                  // here: the job already has its scope, and a picker that
+                  // disagreed with it would be describing the wrong run.
+                  disabled={running}
+                  options={(availableConfigs ?? []).map((config) => ({
+                    value: config.path,
+                    label: config.is_default
+                      ? `${config.name} (default)`
+                      : config.name,
+                  }))}
+                />
+              </Field>
+
+              <Toggle
+                checked={effectiveChunking}
+                onChange={(value) => update({ chunkOversized: value })}
+                label="Analyse oversized functions in chunks"
+                hint={
+                  effectiveChunking
+                    ? `A function over ${selectedConfig?.max_function_lines ?? 200} lines is split and its slices analysed separately, so it adds units to the count.`
+                    : `A function over ${selectedConfig?.max_function_lines ?? 200} lines is dropped entirely — matching a ground truth that has no rows for it.`
+                }
+                disabled={running}
+              />
+
+              {inspection && (
+                <InspectionPanel
+                  inspection={inspection}
+                  stale={scopeStale}
+                  rescanning={inspect.isPending}
+                />
+              )}
 
               <Field
                 label="Save results to"
@@ -455,6 +542,10 @@ export function AnalyzePage() {
           budget={budget}
           estimate={estimate}
           functions={inspection?.functions ?? null}
+          config={selectedConfig}
+          excludedFiles={inspection?.source_files_excluded ?? 0}
+          chunking={effectiveChunking}
+          wholeFunctions={inspection?.whole_functions ?? null}
           onCancel={() => setConfirming(false)}
           onConfirm={() => void launch()}
         />
@@ -476,7 +567,15 @@ const MODE_HINT: Record<Mode, string> = {
     "One pass per function with callers, callees and taint flags injected into the prompt. Cheaper.",
 };
 
-function InspectionPanel({ inspection }: { inspection: InspectResult }) {
+function InspectionPanel({
+  inspection,
+  stale,
+  rescanning,
+}: {
+  inspection: InspectResult;
+  stale: boolean;
+  rescanning: boolean;
+}) {
   if (!inspection.exists) {
     return (
       <div className="note note--error">
@@ -486,15 +585,49 @@ function InspectionPanel({ inspection }: { inspection: InspectResult }) {
     );
   }
 
+  const excluded = Object.entries(inspection.excluded);
+  const splitByChunking =
+    inspection.whole_functions !== null &&
+    inspection.functions !== null &&
+    inspection.whole_functions !== inspection.functions;
+
   return (
-    <div className="analyze__inspect">
+    <div className={stale ? "analyze__inspect analyze__inspect--stale" : "analyze__inspect"}>
+      {/* The counts are only meaningful attached to a scope, so the scope is
+          named on the panel rather than left to be inferred from the picker
+          above it — a screenshot of this panel has to be self-describing. */}
+      {inspection.config_name && (
+        <div className="row-between" style={{ marginBottom: "var(--s3)" }}>
+          <span className="faint" style={{ fontSize: "var(--fs-xs)" }}>
+            Counted under{" "}
+            <span className="mono">{inspection.config_name}</span>
+          </span>
+          {stale && (
+            <Badge variant="warn" subtle>
+              {rescanning ? "re-counting…" : "scope changed"}
+            </Badge>
+          )}
+        </div>
+      )}
+
       <div className="grid-stats">
-        <StatTile label="Source files" value={formatNumber(inspection.source_files)} />
+        <StatTile label="Source files" value={formatNumber(inspection.source_files)} hint="in scope" />
         <StatTile
           label="Functions"
           value={inspection.functions !== null ? formatNumber(inspection.functions) : "—"}
           tone="accent"
-          hint={inspection.scanned ? "will be analysed" : "not counted"}
+          hint={
+            // When chunking is on the two counts diverge, and only one of them
+            // is the number a ground truth has rows for. Showing the split is
+            // the difference between "382" and "382, of which 379 are whole".
+            inspection.scanned && splitByChunking
+              ? `${formatNumber(inspection.whole_functions!)} whole + ${formatNumber(
+                  inspection.functions! - inspection.whole_functions!,
+                )} chunks`
+              : inspection.scanned
+                ? "will be analysed"
+                : "not counted"
+          }
         />
         <StatTile
           label="Skipped"
@@ -514,6 +647,26 @@ function InspectionPanel({ inspection }: { inspection: InspectResult }) {
           </Badge>
         ))}
       </div>
+
+      {/* What the scope cost. Without this the excluded tree is invisible, and
+          an exclusion nobody can see is one nobody can check. */}
+      {excluded.length > 0 && (
+        <div className="analyze__excluded">
+          <span className="faint">
+            {formatNumber(inspection.source_files_excluded)} source file
+            {inspection.source_files_excluded === 1 ? "" : "s"} excluded
+          </span>
+          <div className="row wrap">
+            {excluded.map(([entry, count]) => (
+              <Badge key={entry} variant="neutral" subtle>
+                <span className="mono">{entry}</span>{" "}
+                <span className="faint">{formatNumber(count)}</span>
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
       {inspection.note && <p className="analyze__note">{inspection.note}</p>}
     </div>
   );
@@ -656,6 +809,10 @@ function ConfirmDialog({
   budget,
   estimate,
   functions,
+  config,
+  excludedFiles,
+  chunking,
+  wholeFunctions,
   onCancel,
   onConfirm,
 }: {
@@ -665,6 +822,10 @@ function ConfirmDialog({
   budget: number | null;
   estimate: CostEstimate | null;
   functions: number | null;
+  config: AnalysisConfig | null;
+  excludedFiles: number;
+  chunking: boolean;
+  wholeFunctions: number | null;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -682,8 +843,33 @@ function ConfirmDialog({
           <dd>{outputDir}</dd>
           <dt>Mode</dt>
           <dd>{mode === "react" ? "agentic (ReAct)" : "semantic (call graph)"}</dd>
+          {/* The scope is the line that decides what the other lines mean, so
+              it is stated here and not only on the form behind the dialog. */}
+          <dt>Scope</dt>
+          <dd>
+            {config ? config.filename : "default"}
+            {excludedFiles > 0 && (
+              <span className="faint">
+                {" "}
+                · {formatNumber(excludedFiles)} file
+                {excludedFiles === 1 ? "" : "s"} excluded
+              </span>
+            )}
+          </dd>
           <dt>Functions</dt>
-          <dd>{functions !== null ? formatNumber(functions) : "unknown"}</dd>
+          <dd>
+            {functions !== null ? formatNumber(functions) : "unknown"}
+            {chunking && wholeFunctions !== null && wholeFunctions !== functions && (
+              <span className="faint">
+                {" "}
+                · {formatNumber(wholeFunctions)} whole +{" "}
+                {formatNumber(functions! - wholeFunctions)} chunks
+              </span>
+            )}
+            {!chunking && (
+              <span className="faint"> · oversized dropped</span>
+            )}
+          </dd>
           <dt>Projected cost</dt>
           <dd>
             {estimate?.known ? formatCost(estimate.estimate_usd) : "unknown"}

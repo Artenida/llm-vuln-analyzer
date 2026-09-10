@@ -337,6 +337,7 @@ def build_analyze_argv(
     visualize: bool = True,
     dry_run: bool = False,
     resume: bool = False,
+    chunk_oversized: Optional[bool] = None,
     budget_usd: Optional[float] = None,
     api_key_alias: Optional[str] = None,
 ) -> list[str]:
@@ -365,6 +366,11 @@ def build_analyze_argv(
         argv.append("--dry-run")
     if resume:
         argv.append("--resume")
+    # Tri-state on purpose: None leaves the config's setting alone. Sending a
+    # boolean unconditionally would make the web UI silently authoritative over
+    # every config file, including for callers that never touched the control.
+    if chunk_oversized is not None:
+        argv.append("--chunk-oversized" if chunk_oversized else "--no-chunk-oversized")
     if config_path:
         config = paths.normalise(config_path)
         if not config.is_file():

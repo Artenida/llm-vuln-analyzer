@@ -55,6 +55,11 @@ class AppConfig:
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    # One line naming the scope this config defines, for the analysis-scope
+    # picker in the web UI. A config is the only place that decides which
+    # functions a run sees, so the name of that decision belongs beside it
+    # rather than in a lookup table the configs could drift away from.
+    description: str = ""
 
     @property
     def openai_api_key(self) -> Optional[str]:
@@ -91,7 +96,11 @@ def load_config(path: Optional[str] = None) -> AppConfig:
     if not config_path.exists():
         return AppConfig()
 
-    with open(config_path, "r") as f:
+    # Explicit encoding: Python's default is the locale codepage, which is
+    # cp1252 on Windows, so a UTF-8 config came back mojibake'd. It went
+    # unnoticed while every value read from here was ASCII — the first non-ASCII
+    # one (a description with an em dash) surfaced it in the UI.
+    with open(config_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
     llm_raw = raw.get("llm", {})
@@ -122,4 +131,5 @@ def load_config(path: Optional[str] = None) -> AppConfig:
             react_mode=agt_raw.get("react_mode", False),
             max_steps=agt_raw.get("max_steps", 5),
         ),
+        description=raw.get("description", ""),
     )

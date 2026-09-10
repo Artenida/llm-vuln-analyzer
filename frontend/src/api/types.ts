@@ -76,12 +76,40 @@ export interface InspectResult {
   path: string;
   exists: boolean;
   is_dir: boolean;
+  /** Source files the chosen config keeps. */
   source_files: number;
   languages: Record<string, number>;
   functions: number | null;
   functions_skipped: number | null;
   scanned: boolean;
+  /** The config these counts were taken under — always set, never inferred. */
+  config_path: string | null;
+  config_name: string | null;
+  config_description: string | null;
+  chunk_oversized: boolean;
+  /** Whole functions, before oversized ones are split into chunks. */
+  whole_functions: number | null;
+  source_files_excluded: number;
+  /** Skip entry → source files it excluded, largest first. */
+  excluded: Record<string, number>;
   note: string | null;
+}
+
+// ── analysis configs ─────────────────────────────────────────────────────────
+
+/** One `experiments/configs/*.yaml` — the unit that decides a run's scope. */
+export interface AnalysisConfig {
+  name: string;
+  filename: string;
+  path: string;
+  display_path: string;
+  description: string;
+  model: string;
+  react: boolean;
+  max_function_lines: number;
+  chunk_oversized: boolean;
+  skip_dirs: string[];
+  is_default: boolean;
 }
 
 // ── jobs ─────────────────────────────────────────────────────────────────────
